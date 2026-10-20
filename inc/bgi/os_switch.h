@@ -1,0 +1,90 @@
+/*
+ * This file is part of OpenBGI (https://openbgi.net).
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * os_switch.h - declarations shared by the files of the Nintendo Switch
+ *               back end (src/os/switch/); nothing above the OS layer
+ *               includes this.
+ */
+#ifndef BGI_OS_SWITCH_H_
+#define BGI_OS_SWITCH_H_
+
+#include "bgi/common.h"
+
+#include <switch.h>
+#include <deko3d.h>
+
+// ---- Graphics (deko3d) ------------------------------------------------------
+extern DkDevice gSwitchDevice;
+extern DkQueue gSwitchQueue;
+extern DkSwapchain gSwitchSwapchain;
+extern DkMemBlock gSwitchImageMemBlock;
+extern DkImage gSwitchFramebuffers[2];
+extern uint32_t gSwitchFramebufferWidth;
+extern uint32_t gSwitchFramebufferHeight;
+
+int OsSwitch_GraphicsInit(int width, int height);
+void OsSwitch_GraphicsShutdown(void);
+
+// Upload the software framebuffer (0xAABBGGRR pixels, RGBA in memory) and
+// present it.  Safe to call when graphics are not initialised.
+void OsSwitch_GraphicsPresent(void);
+
+// The software framebuffer the window layer draws into.
+uint32_t* OsSwitch_Framebuffer(int* pitchPixels, int* width, int* height);
+void OsSwitch_FramebufferClear(uint32_t rgba);
+
+// ---- Window coordinate mapping ---------------------------------------------
+// The engine works in the picture's (display mode's) coordinates; the back
+// end scales that picture into the 1280x720 screen with its aspect kept.
+int OsSwitch_ModeToScreenX(int x);
+int OsSwitch_ModeToScreenY(int y);
+int OsSwitch_ScreenToModeX(int x);
+int OsSwitch_ScreenToModeY(int y);
+void OsSwitch_WindowSetPictureSize(int w, int h);
+
+// ---- Input ------------------------------------------------------------------
+extern PadState gSwitchPad;
+
+void OsSwitch_InputInit(void);
+void OsSwitch_InputShutdown(void);
+void OsSwitch_InputUpdate(void);
+
+// Called by input.c for every virtual-key transition; raises the engine's
+// key_down / key_up callbacks (window.c).
+void OsSwitch_RaiseKey(int vk, int down);
+void OsSwitch_RaiseMouseMove(int x, int y);
+void OsSwitch_RaiseMouseButton(int button, int down, int x, int y);
+void OsSwitch_RaiseMouseWheel(int delta);
+
+// ---- Path conversions -------------------------------------------------------
+// Shift-JIS Windows path -> UTF-8 Switch path under the game root (romfs:/
+// or the OS_SetGameDir override).  `write` selects the writable SD root
+// (sdmc:/switch/openbgi/) instead.
+void OsSwitch_Path(const char* win, char* out, size_t n);
+void OsSwitch_PathWrite(const char* win, char* out, size_t n);
+
+// Shift-JIS text -> UTF-8 (window titles, dialog labels)
+void OsSwitch_SjisToUtf8(const char* sjis, char* out, size_t n);
+uint32_t OsSwitch_SjisChar(uint16_t code);
+int OsSwitch_UnicodeToSjis(uint32_t cp, char out[2]);
+
+// The roots used by the path conversion (both with a trailing separator).
+void OsSwitch_GameRoot(char* out, size_t n);
+void OsSwitch_WriteRoot(char* out, size_t n);
+void OsSwitch_SetGameRoot(const char* root);
+
+// ---- Font rendering ---------------------------------------------------------
+void OsSwitch_FontShutdown(void);
+
+// ---- Application lifecycle --------------------------------------------------
+extern AppletHookCookie gSwitchAppletHookCookie;
+extern int gSwitchShouldClose;
+
+void OsSwitch_AppletHook(AppletHookType hook, void* param);
+
+// ---- Time -------------------------------------------------------------------
+// Nanoseconds since the back end started (monotonic).
+uint64_t OsSwitch_TicksNs(void);
+
+#endif // BGI_OS_SWITCH_H_

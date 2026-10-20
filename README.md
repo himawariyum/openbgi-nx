@@ -66,9 +66,10 @@ The games we have been working on, with the engine build each one needs
 ### Testing scope
 
 Apart from the trial of Sen no Hatou, Tsukisome no Kouki (August), whose
-build is surveyed but not yet playable, and Fortune Arterial (August),
-which boots (`--no-disc-check`), only Lump of Sugar games have been
-tested so far.  We are interested in testing other BGI-based games: if you have one, tell us how it goes in
+build is surveyed but not yet playable, Fortune Arterial (August),
+which boots (`--no-disc-check`), and Yoake mae yori Ruri iro na
+(August, 1.658.2 on the 1.659 profile), whose prologue plays, only Lump
+of Sugar games have been tested so far.  We are interested in testing other BGI-based games: if you have one, tell us how it goes in
 our [Discord](https://discord.gg/3zFTJWUNt7).
 
 Testing happens on a case-by-case basis, and to exercise newly implemented opcodes and subsystems. The is currently no extensive testkit again individual games, except booting up a game and actually playing it.
@@ -280,6 +281,37 @@ print and take their default button), `BGI_TRACE`, `BGI_TRACE_FROM`,
 `BGI_PANEL_DEBUG=1` (the buttons of every panel at its start and the
 events it queues), `BGI_DEBUG_OVERLAY=1` (the debugger over the game's
 picture instead of in a window of its own).
+
+## Special Thanks and Honourable Mentions
+
+### Special Thanks
+
+* Darios Sawm / Buriko Co., Ltd.
+* [Anonymous]
+* minirop
+* Galladite
+* txt231
+
+### Honourable Mentions
+
+* The BGI tools of the community:
+  * [GARbro](https://github.com/morkt/GARbro) (morkt)
+  * [arc_unpacker](https://github.com/vn-tools/arc_unpacker) (vn-tools)
+  * [EthornellTools](https://github.com/arcusmaximus/EthornellTools)
+    (arcusmaximus)
+  * [VNTranslationTools](https://github.com/arcusmaximus/VNTranslationTools)
+    (arcusmaximus)
+  * [Bgi_tools](https://github.com/mchubby/Bgi_tools) (mchubby)
+  * [engine_bgi](https://github.com/mnakamura1337/engine_bgi)
+    (mnakamura1337)
+  * [ethornell-tools](https://github.com/Jair4x/ethornell-tools) (Jair4x)
+  * [bgi-extractor](https://github.com/mirinnano/bgi-extractor)
+    (mirinnano)
+  * [BGIextractor](https://github.com/myzert/BGIextractor) (myzert)
+* [BGI](https://github.com/txt231/BGI) by txt231
+* [ethornell-rs](https://github.com/xmoezzz/ethornell-rs) (xmoezzz)
+* Operation Bellflower - [Adventures in the Ethornell
+  Engine](https://www.operationbellflower.com/blog/adventures-in-the-ethornell-engine/part-1)
 
 ## License
 

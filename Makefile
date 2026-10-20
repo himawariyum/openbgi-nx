@@ -37,8 +37,9 @@ CFLAGS  += $(CSTD) $(WARN) $(OPT) $(INC) -D_POSIX_C_SOURCE=200809L
 LDFLAGS +=
 
 # ---- platform -------------------------------------------------------------
-# PLATFORM is "posix", "win32" or "wasm"; "make win" selects the MinGW
-# toolchain, "make wasm" Emscripten (emcc on the PATH, e.g. from emsdk).
+# PLATFORM is "posix", "win32", "wasm" or "switch"; "make win" selects the MinGW
+# toolchain, "make wasm" Emscripten (emcc on the PATH, e.g. from emsdk),
+# "make switch" targets Nintendo Switch with devkitA64.
 PLATFORM ?= posix
 ifeq ($(PLATFORM),wasm)
   CC      := emcc
@@ -83,6 +84,33 @@ else ifeq ($(PLATFORM),win32)
   LDLIBS  += -lgdi32 -luser32 -lwinmm -limm32 -lcomctl32 -lole32 -loleaut32 -lshell32 -ladvapi32 -lcomdlg32 -luuid -lstrmiids
   CFLAGS  += -DBGI_WIN32
   LDFLAGS += -mwindows
+else ifeq ($(PLATFORM),switch)
+  # Nintendo Switch build with devkitA64
+  ifeq ($(strip $(DEVKITPRO)),)
+    $(error "Please set DEVKITPRO in your environment. export DEVKITPRO=<path to>/devkitpro")
+  endif
+  include $(DEVKITPRO)/libnx/switch_rules
+  
+  ARCH    := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
+  CC      := $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-gcc
+  AR      := $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-ar
+  EXE     := .elf
+  TARGET  := bin/bgi.nro
+  
+  CFLAGS  := -g -Wall -O2 -ffunction-sections $(ARCH) $(INCLUDE) $(INC) -DBGI_SWITCH -D__SWITCH__
+  CFLAGS  += -I$(DEVKITPRO)/libnx/include -I$(DEVKITPRO)/portlibs/switch/include
+  CFLAGS  += -I$(DEVKITPRO)/portlibs/switch/include/freetype2
+  
+  LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+  
+  LIBS    := -ldeko3d -lnx -lfreetype -lpng -lz -lbz2 -lm
+  LIBDIRS := $(PORTLIBS) $(LIBNX)
+  LDFLAGS += $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+  LDLIBS  += $(LIBS)
+  
+  OS_SRC  := $(wildcard src/os/switch/*.c)
+  VORBIS  := stb  # Use stb_vorbis for Switch
+  ROMFS_FILES := $(shell find romfs -type f 2>/dev/null)
 else
   EXE     :=
   OS_SRC  := $(wildcard src/os/posix/*.c)
@@ -149,7 +177,7 @@ LIB_OBJ := $(filter-out obj/$(PLATFORM)/sys/main.o,$(OBJ)) # the engine without 
 
 TARGET ?= bin/bgi$(EXE)
 
-.PHONY: all win wasm wasm-sim tools check check-win check-wasm wasm-test test clean msg
+.PHONY: all win wasm wasm-sim switch tools check check-win check-wasm wasm-test test clean msg
 
 all: $(TARGET)
 
@@ -179,9 +207,18 @@ wasm:
 wasm-sim:
 	$(MAKE) PLATFORM=wasmsim
 
-$(TARGET): $(OBJ) | bin
+switch:
+	$(MAKE) PLATFORM=switch
+
+$(TARGET): $(OBJ) $(ROMFS_FILES) | bin
 	@mkdir -p $(dir $@)
+ifeq ($(PLATFORM),switch)
+	$(CC) $(LDFLAGS) -o bin/bgi$(EXE) $(OBJ) $(LDLIBS)
+	$(DEVKITPRO)/tools/bin/nacptool --create "OpenBGI" "OpenBGI Contributors" "1.0.0" bin/bgi.nacp
+	$(DEVKITPRO)/tools/bin/elf2nro bin/bgi$(EXE) $(TARGET) --nacp=bin/bgi.nacp --icon=$(or $(BGI_ICON),$(DEVKITPRO)/libnx/default_icon.jpg) $(if $(wildcard romfs),--romfsdir=romfs)
+else
 	$(CC) $(LDFLAGS) -o $@ $(OBJ) $(LDLIBS)
+endif
 
 obj/$(PLATFORM)/%.o: src/%.c | inc/bgi/msg.h
 	@mkdir -p $(dir $@)

@@ -1,0 +1,15 @@
+{
+  "OpenBGI Test Game": {
+    "id": "test",
+    "version": "1.0.0",
+    "files": [
+      "games/test.000",
+      "games/test.001",
+      "games/test.002"
+    ],
+    "fonts": [
+      "fonts/gothic.otf"
+    ],
+    "config": "data/config.ini"
+  }
+}
