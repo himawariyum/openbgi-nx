@@ -52,6 +52,31 @@ VmHandler_t vm_optable_91[256]; // the "91 xx" dispatch table, filled by Vm_Opta
  * presented even without a pending request.  Stored only; the display
  * here has no counterpart. */
 static int gPresentAlways;
+static int Opcode_Gfx1_SetInternalFeature(Thread_t* t)
+{
+    int enabled = (int)Thread_Pop(t);
+    uint32_t feature = Thread_Pop(t);
+
+    switch(feature)
+    {
+        case 0x01220000:
+            // Legacy renderer optimization 1
+            break;
+
+        case 0x80111600:
+            // Legacy renderer optimization 2
+            break;
+
+        default:
+            ScriptError(
+                "This hardware does not support required function.",
+                t
+            );
+    }
+
+    (void)enabled;
+    return 0;
+}
 static int Opcode_Gfx1_SetPresentAlways(Thread_t* t)
 {
 	gPresentAlways = (int)Thread_Pop(t);
@@ -1363,6 +1388,7 @@ static int Opcode_Gfx1_SetKeyMap(Thread_t* t) // 91 BF: no, actions →
 void Vm_Optable91Init(void)
 {
 	static const OpEntry_t ops[] = {
+		{0x0A, Opcode_Gfx1_SetInternalFeature, GEN_1_653, GEN_LAST},
 		{0x00, Opcode_Gfx1_SetPresentAlways, GEN_1_653, GEN_LAST},
 		{0x06, Opcode_Gfx1_SetGlobalOffset, GEN_1_616, GEN_LAST},
 		{0x55, Opcode_Gfx1_SpriteLinkMask, GEN_1_529, GEN_LAST},

@@ -51,20 +51,40 @@ Optional at run time, not linked:
 
 `OPT=...` replaces the optimisation flags (`-O2 -g` by default).
 
+## Prerequisites on Windows
+
+* a MinGW-w64 gcc on the PATH (for example MSYS2's
+  `mingw-w64-x86_64-gcc`, or a standalone MinGW-Builds / w64devkit);
+* GNU make, run from an MSYS2/MSYS shell - the Makefile uses `mkdir -p`,
+  `rm -rf`, shell loops and `python3`, which a `cmd.exe`-only
+  `mingw32-make` session does not provide;
+* `python3` for the generated message table.
+
+A MinGW gcc selects the Win32 back end automatically: plain `make` builds
+`bin/bgi.exe`, `make tools` builds `bin/bpasm.exe`, `bin/bgiscn.exe`,
+`bin/bgidump.exe` and `bin/bgipack.exe`, and objects go to `obj/win32/`.
+No X11 or FreeType is needed; the engine links the Win32 libraries
+instead.  `make PLATFORM=posix` still forces the Linux back end (which is
+normally not what a Windows host wants).
+
+If you get errors about `cc` not being found, explicitly specify the
+compiler: `make CC=gcc tools` or `make CC=gcc`.  The Makefile attempts to
+auto-detect MinGW, but some shells may not have `cc` available.
+
 ## Targets
 
 | target | what it builds or does |
 |--------|------------------------|
-| `make` | the Linux engine, `bin/bgi` |
+| `make` | the native engine: `bin/bgi` on Linux, `bin/bgi.exe` on Windows |
 | `make test` | builds and runs the unit tests of `tests/` (`bin/test_*`): the assembler, the BF_Movie decoder, the blitters, the archive reader and the DSC / CBG decoders, the extraction options, the games table, the ffmpeg movie player, the sound codecs and library, the text engine, the VM's base instructions, the WebAssembly file layer against a mock server and the Win32 string conversions |
 | `make check` | syntax-checks every translation unit of the Linux build with `-pedantic` |
 | `make check-win` | syntax-checks the Win32 back end against the stub SDK headers (below; no MinGW needed) |
 | `make check-wasm` | syntax-checks the WebAssembly back end against a stub Emscripten header (below; no emcc needed) |
-| `make win` | the Windows engine through MinGW, `bin/bgi.exe` |
+| `make win` | the Windows engine through MinGW (natively with a MinGW-w64 gcc on Windows, cross-built elsewhere), `bin/bgi.exe` |
 | `make wasm` | the browser build through Emscripten, `bin/wasm/openbgi.html` with its `.js` and `.wasm` |
 | `make wasm-sim` | the WebAssembly back end as a native Linux binary, `bin/openbgi-wasmsim`, with no browser involved |
 | `make wasm-test` | the asset server's protocol test under node |
-| `make tools` | the command-line tools: `bin/bpasm`, the assembler / disassembler (`docs/asm.md`) and decompiler / compiler (`docs/bpc.md`) of the game's programs; `bin/bgiscn`, the decompiler / compiler of the scenario files (`docs/scenario.md`); `bin/bgidump` and `bin/bgipack`, which dump a game's archives into editable files and pack them again (`docs/dump.md`).  `make PLATFORM=win32 tools` builds them as `.exe` through MinGW |
+| `make tools` | the command-line tools: `bin/bpasm`, the assembler / disassembler (`docs/asm.md`) and decompiler / compiler (`docs/bpc.md`) of the game's programs; `bin/bgiscn`, the decompiler / compiler of the scenario files (`docs/scenario.md`); `bin/bgidump` and `bin/bgipack`, which dump a game's archives into editable files and pack them again (`docs/dump.md`).  On a Windows host these are the `.exe` files, built with the native MinGW gcc; from another host `make PLATFORM=win32 tools` cross-compiles them with MinGW |
 | `make msg` | regenerates `inc/bgi/msg.h` from `tools/messages.txt` |
 | `make clean` | removes `obj/` and `bin/` |
 
@@ -73,18 +93,22 @@ The engine is run from inside a game's directory (`cd <game>;
 
 ## The Windows build
 
-`make win` builds with `i686-w64-mingw32-gcc` (`CROSS=` selects another
-prefix, e.g. `make win CROSS=x86_64-w64-mingw32-`) and links gdi32,
-user32, winmm, imm32, comctl32, ole32, oleaut32, shell32, advapi32,
-comdlg32, uuid and strmiids.  The optional libraries are looked up with
-the toolchain's own `$(CROSS)pkg-config`, never the host's: without a
-libvorbisfile built for MinGW the Vorbis decoder is `src/snd/stb_vorbis.c`
-when that file is there, else none.  The objects go to `obj/win32/`;
-objects left there by another compiler have to be removed first (`rm -rf
-obj/win32`), since make does not notice the change.  The Win32 back end
-(`src/os/win32/`) is the original's windowing, dialog, GDI, waveOut, MCI
-and DirectShow code with the engine's decisions taken out
-(`docs/os_layer.md`).
+On a Windows host with a MinGW-w64 gcc on the PATH, plain `make` and
+`make win` build natively with that compiler; the objects go to
+`obj/win32/` and the result is `bin/bgi.exe`.  A cross build from another
+host uses `i686-w64-mingw32-gcc` by default (`CROSS=` selects another
+prefix, e.g. `make win CROSS=x86_64-w64-mingw32-`; `CROSS=` empty uses
+the host's gcc).  Either way it links gdi32, user32, winmm, imm32,
+comctl32, ole32, oleaut32, shell32, advapi32, comdlg32, uuid and
+strmiids.  The optional libraries are looked up with the toolchain's own
+`$(CROSS)pkg-config` (the host's when `CROSS` is empty), not with the
+source host's pkg-config: without a libvorbisfile built for MinGW
+the Vorbis decoder is `src/snd/stb_vorbis.c` when that file is there,
+else none.  Objects left there by another compiler have to be removed
+first (`rm -rf obj/win32`), since make does not notice the change.  The
+Win32 back end (`src/os/win32/`) is the original's windowing, dialog,
+GDI, waveOut, MCI and DirectShow code with the engine's decisions taken
+out (`docs/os_layer.md`).
 
 The back end calls the wide-character (W) entry points of Windows only
 and converts the engine's Shift-JIS strings itself (`docs/os_layer.md`),

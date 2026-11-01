@@ -76,9 +76,13 @@ Testing happens on a case-by-case basis, and to exercise newly implemented opcod
 
 ## Building
 
-    make              Linux (gcc or clang; X11, Xext, FreeType, optionally
-                      ALSA, fontconfig and libvorbisfile via pkg-config)
-    make win          Windows through MinGW (i686-w64-mingw32-gcc)
+    make              native build: Linux (gcc or clang; X11, Xext,
+                      FreeType, optionally ALSA, fontconfig and
+                      libvorbisfile via pkg-config) or Windows through
+                      MinGW-w64 (no X11 / FreeType needed)
+    make win          Windows through MinGW (native MinGW-w64 on a
+                      Windows host, i686-w64-mingw32-gcc when cross
+                      building)
     make wasm         the browser through Emscripten (emcc) -> bin/wasm/openbgi.html;
                       `node tools/wasm/server.js <game dir>` serves it (docs/wasm.md)
     make tools        the command-line tools: bin/bpasm, the assembler /
@@ -86,7 +90,8 @@ Testing happens on a case-by-case basis, and to exercise newly implemented opcod
                       bin/bgiscn, the decompiler / compiler of the scenario
                       files (docs/scenario.md); bin/bgidump and bin/bgipack,
                       which turn a game's archives into editable files and
-                      back, for translations (docs/dump.md)
+                      back, for translations (docs/dump.md).  On Windows
+                      these are .exe files, built with the native MinGW gcc
     make check        syntax-check every translation unit with -pedantic
     make test         build and run tests/
     make clean

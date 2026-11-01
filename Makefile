@@ -3,11 +3,12 @@
 #
 # Makefile - builds OpenBGI
 #
-#   make                 native Linux build        -> bin/bgi
-#   make win             MinGW cross build          -> bin/bgi.exe
+#   make                 native build (Linux, or Windows through MinGW) -> bin/bgi
+#   make win             MinGW build (native on Windows, cross elsewhere) -> bin/bgi.exe
 #   make wasm            Emscripten build           -> bin/wasm/openbgi.html (+ .js, .wasm; docs/wasm.md)
 #   make CC=clang        any other C99 compiler
 #   make tools           the command-line tools -> bin/bpasm, bin/bgiscn, bin/bgidump, bin/bgipack
+#                        (.exe on Windows)
 #   make test            build and run the unit tests (tests/)
 #   make check           syntax-check every source with -pedantic
 #   make check-win       syntax-check src/os/win32 against stub SDK headers (no MinGW needed)
@@ -24,6 +25,19 @@ CC      ?= gcc
 # the optional libraries are looked up with pkg-config; a cross build uses
 # its toolchain's own (see the win32 platform below), never the host's
 PKG_CONFIG ?= pkg-config
+# a MinGW gcc means a Windows host: the Win32 back end is the native one
+# there (and "make tools" then produces .exe files). Detect from the compiler
+# or from OS environment variables as fallback.
+HOST_TARGET := $(shell $(CC) -dumpmachine 2>/dev/null || echo unknown)
+HOST_IS_WINDOWS := $(findstring mingw,$(HOST_TARGET))$(findstring windows,$(HOST_TARGET))$(findstring msys,$(HOST_TARGET))
+# fallback detection from environment if compiler test failed
+ifeq ($(HOST_IS_WINDOWS),)
+  ifdef MSYSTEM
+    HOST_IS_WINDOWS := msys
+  else ifdef MINGW_PREFIX
+    HOST_IS_WINDOWS := mingw
+  endif
+endif
 CSTD    := -std=c99
 # -Wno-format-truncation / -Wno-format-overflow: the engine formats paths and
 # messages into fixed MAX_PATH-sized buffers as the original does; GCC's
@@ -37,10 +51,11 @@ CFLAGS  += $(CSTD) $(WARN) $(OPT) $(INC) -D_POSIX_C_SOURCE=200809L
 LDFLAGS +=
 
 # ---- platform -------------------------------------------------------------
-# PLATFORM is "posix", "win32", "wasm" or "switch"; "make win" selects the MinGW
+# PLATFORM is "posix", "win32", "wasm" or "switch"; a MinGW gcc selects
+# "win32" (the native Windows back end), "make win" selects the MinGW
 # toolchain, "make wasm" Emscripten (emcc on the PATH, e.g. from emsdk),
 # "make switch" targets Nintendo Switch with devkitA64.
-PLATFORM ?= posix
+PLATFORM ?= $(if $(HOST_IS_WINDOWS),win32,posix)
 ifeq ($(PLATFORM),wasm)
   CC      := emcc
   EXE     := .html
@@ -74,10 +89,17 @@ else ifeq ($(PLATFORM),wasmsim)
   TARGET  := bin/openbgi-wasmsim
   VORBIS  := none
 else ifeq ($(PLATFORM),win32)
-  # CROSS is the toolchain prefix; it must not be given a value (not even an
-  # empty one) before this line, or "?=" keeps that and the host's gcc builds
-  CROSS   ?= i686-w64-mingw32-
-  CC      := $(CROSS)gcc
+  # CROSS is the toolchain prefix of a cross build.  A Windows host already
+  # has a MinGW gcc (HOST_IS_WINDOWS), so it builds with that and no prefix;
+  # elsewhere the i686-w64-mingw32 cross compiler is used unless CROSS names
+  # another one (e.g. CROSS=x86_64-w64-mingw32-).  An explicit CROSS always
+  # wins; it may be empty to use the host's gcc (CROSS=).
+  ifneq ($(origin CROSS),undefined)
+    CC      := $(CROSS)gcc
+  else ifeq ($(HOST_IS_WINDOWS),)
+    CROSS   ?= i686-w64-mingw32-
+    CC      := $(CROSS)gcc
+  endif
   PKG_CONFIG := $(CROSS)pkg-config
   EXE     := .exe
   OS_SRC  := $(wildcard src/os/win32/*.c)
