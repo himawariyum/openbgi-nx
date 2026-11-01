@@ -29,29 +29,30 @@ The games we have been working on, with the engine build each one needs
 
 | Game | Product name | Engine version | Status |
 |---|---|---|---|
-| Nursery Rhyme (trial) | `NurseryRhymeTrial` | 1.58 | Very playable |
-| Nursery Rhyme | `NurseryRhyme` | 1.64 | Very playable |
-| Itsuka, Todoku, Ano Sora ni. | `ItsukaTodokuAnoSorani` | 1.66 | Mostly playable |
-| Tayutama -Kiss on my Deity- (trial; the reference build) | `Tayutama` | 1.69 build 444 | Very playable |
-| Tayutama -Kiss on my Deity- | `Tayutama` | 1.69 build 451 | Very playable |
-| Tayutama -It's happy days- | `TayutamaHD` | 1.69 build 472 | Very playable |
-| Prism Rhythm | `PrismRhythm` | 1.494 | Very playable |
-| Diamic Days | `DiamicDays` | 1.529 | Very playable |
-| Gakuou -THE ROYAL SEVEN STARS- | `Gackoh` | 1.535 | Very playable |
-| Gakuou -It's Heartful Days!!- | `Gackoh_HD` | 1.547 | Very playable |
-| Hanairo Heptagram | `HanairoHeptagram` | 1.553 | Very playable |
-| Magical Charming! | `MagicalCharming!` | 1.573 | Very playable |
-| Sekai to Sekai no Mannaka de | `SekaiToSekaiNoMannakaDe` | 1.588 | Very playable |
-| Unmei Senjou no Phi | `UnmeisenjouNoPhi` | 1.599 | Very playable |
-| Kodomo no Asobi | `KodomoNoAsobi` | 1.616 | Playable |
-| Sen no Hatou, Tsukisome no Kouki (trial) | `SenNoHatouTsukisomeNoKouki` | 1.636 | Testing in progress |
-| Tayutama 2 -After Stories- | `Tayutama2AS` | 1.640 | Playable |
-| Wakabairo no Quartet | `WakabaironoQuartet` | 1.653 | Playable |
-| Nekotsuku, Sakura. | `NekoTsukuSakura` | 1.654 | Somewhat playable, glitchy |
-| Madohi Shiroki no Kamikakushi | `MadoiShirokinoKamikakushi` | 1.659 | Boots, but crashes in prolouge |
-| Yumahorome | `Yumahorome` | 1.662 | Boots, but crashes in prolouge |
 | Arcana Alchemia | `ArcanaAlchemia` | 1.667 | Testing in progress |
+| Diamic Days | `DiamicDays` | 1.529 | Very playable |
+| Gakuou -It's Heartful Days!!- | `Gackoh_HD` | 1.547 | Very playable |
+| Gakuou -THE ROYAL SEVEN STARS- | `Gackoh` | 1.535 | Very playable |
+| Hanairo Heptagram | `HanairoHeptagram` | 1.553 | Very playable |
 | Haruka Ao no Hanayome ni | `HarukaAonoHanayomeni` | 1.669 | Testing in progress |
+| Itsuka, Todoku, Ano Sora ni. | `ItsukaTodokuAnoSorani` | 1.66 | Mostly playable |
+| Kodomo no Asobi | `KodomoNoAsobi` | 1.616 | Playable |
+| Madohi Shiroki no Kamikakushi | `MadoiShirokinoKamikakushi` | 1.659 | Boots, but crashes in prolouge |
+| Magical Charming! | `MagicalCharming!` | 1.573 | Very playable |
+| Nekotsuku, Sakura. | `NekoTsukuSakura` | 1.654 | Somewhat playable, glitchy |
+| Nursery Rhyme | `NurseryRhyme` | 1.64 | Very playable |
+| Nursery Rhyme (trial) | `NurseryRhymeTrial` | 1.58 | Very playable |
+| Prism Rhythm | `PrismRhythm` | 1.494 | Very playable |
+| Sekai to Sekai no Mannaka de | `SekaiToSekaiNoMannakaDe` | 1.588 | Very playable |
+| Sen no Hatou, Tsukisome no Kouki (trial) | `SenNoHatouTsukisomeNoKouki` | 1.636 | Testing in progress |
+| Wonderful Everyday Full Voice HD Edition | `SubarashikiHibi` | 1.647 | Playable |
+| Tayutama -It's happy days- | `TayutamaHD` | 1.69 build 472 | Very playable |
+| Tayutama -Kiss on my Deity- | `Tayutama` | 1.69 build 451 | Very playable |
+| Tayutama -Kiss on my Deity- (trial; the reference build) | `Tayutama` | 1.69 build 444 | Very playable |
+| Tayutama 2 -After Stories- | `Tayutama2AS` | 1.640 | Playable |
+| Unmei Senjou no Phi | `UnmeisenjouNoPhi` | 1.599 | Very playable |
+| Wakabairo no Quartet | `WakabaironoQuartet` | 1.653 | Playable |
+| Yumahorome | `Yumahorome` | 1.662 | Boots, but crashes in prolouge |
 
 ### Definitions
 
