@@ -15,6 +15,9 @@
 #include "bgi/os.h"
 #include "bgi/os_common.h"
 #include "bgi/os_switch.h"
+#include "bgi/json.h"
+
+#include <ctype.h>
 
 #include <dirent.h>
 #include <strings.h>
@@ -65,6 +68,20 @@ struct OsFont
 static FT_Library gFt;
 static FaceRec_t* gFaces;
 
+// SWITCH_FONTMAP_PATCH_BEGIN
+// Per-game font substitutions.  The Switch renderer already uses FreeType,
+// so a mapping only changes the font file/face index selected by ResolveFace.
+// No SDL renderer or additional devkitPro portlib is needed.
+#define SWITCH_FONTMAP_FILE       "fontmap.json"
+#define SWITCH_FONTMAP_MAX_BYTES  (256u * 1024u)
+#define SWITCH_FONTMAP_PATH_MAX   1024
+static JsonNode_t* gSwitchFontMap;
+static char gSwitchFontMapRoot[SWITCH_FONTMAP_PATH_MAX];
+static char gSwitchFontMapBase[SWITCH_FONTMAP_PATH_MAX];
+static int gSwitchFontMapLoaded;
+// SWITCH_FONTMAP_STATE_END
+
+
 // font files the game made available, searched before the standard folders
 #define SWITCH_FONT_FILES 8
 static char gFontFiles[SWITCH_FONT_FILES][1024];
@@ -81,6 +98,11 @@ void OsSwitch_FontShutdown(void)
 {
 	if(gFaces)
 		return;
+	Json_Free(gSwitchFontMap);
+	gSwitchFontMap = NULL;
+	gSwitchFontMapRoot[0] = 0;
+	gSwitchFontMapBase[0] = 0;
+	gSwitchFontMapLoaded = 0;
 	if(gFt)
 	{
 		FT_Done_FreeType(gFt);
@@ -179,6 +201,195 @@ static const char* const kMinchoFiles[] = {"NotoSerifJP-Regular.otf", "NotoSerif
 
 static const char* const kFontDirs[] = {"romfs:/fonts", "sdmc:/switch/openbgi/fonts", "sdmc:/switch", NULL};
 
+static int FontMapIsAbsolute(const char* path)
+{
+	return path && (strncmp(path, "romfs:/", 7) == 0 || strncmp(path, "sdmc:/", 6) == 0);
+}
+
+static int FontMapJoin(char* out, size_t n, const char* dir, const char* leaf)
+{
+	int written;
+	size_t len;
+	if(!out || n == 0 || !dir || !leaf)
+		return 0;
+	written = snprintf(out, n, "%s", dir);
+	if(written < 0 || (size_t)written >= n)
+		return 0;
+	len = (size_t)written;
+	if(len && out[len - 1] != '/')
+	{
+		if(len + 1 >= n)
+			return 0;
+		out[len++] = '/';
+		out[len] = 0;
+	}
+	written = snprintf(out + len, n - len, "%s", leaf);
+	if(written < 0 || (size_t)written >= n - len)
+		return 0;
+	return 1;
+}
+
+static int FontMapLoadFromRoot(const char* root)
+{
+	char configPath[SWITCH_FONTMAP_PATH_MAX];
+	FILE* f;
+	long length;
+	char* text;
+	JsonNode_t* doc;
+	const JsonNode_t* fonts;
+	if(!FontMapJoin(configPath, sizeof configPath, root, SWITCH_FONTMAP_FILE))
+		return 0;
+	f = fopen(configPath, "rb");
+	if(!f)
+		return 0;
+	if(fseek(f, 0, SEEK_END) != 0 || (length = ftell(f)) < 0 ||
+	   (unsigned long)length > SWITCH_FONTMAP_MAX_BYTES || fseek(f, 0, SEEK_SET) != 0)
+	{
+		fclose(f);
+		return 0;
+	}
+	text = (char*)malloc((size_t)length + 1);
+	if(!text)
+	{
+		fclose(f);
+		return 0;
+	}
+	if(length && fread(text, 1, (size_t)length, f) != (size_t)length)
+	{
+		free(text);
+		fclose(f);
+		return 0;
+	}
+	fclose(f);
+	text[length] = 0;
+	doc = Json_Parse(text, (size_t)length, NULL);
+	free(text);
+	fonts = doc ? Json_Get(doc, "fonts") : NULL;
+	if(!fonts || fonts->type != JSON_ARRAY)
+	{
+		Json_Free(doc);
+		return 0;
+	}
+	gSwitchFontMap = doc;
+	snprintf(gSwitchFontMapBase, sizeof gSwitchFontMapBase, "%s", root);
+	return 1;
+}
+
+/* Prefer a game-local map.  The SD fallback makes it possible to keep a
+ * fontmap.json and replacement fonts in /switch/openbgi/ when the game is
+ * supplied from RomFS.  Reload when the selected game root changes. */
+static void FontMapEnsureLoaded(void)
+{
+	char gameRoot[SWITCH_FONTMAP_PATH_MAX];
+	static const char kSdConfigRoot[] = "sdmc:/switch/openbgi/";
+	OsSwitch_GameRoot(gameRoot, sizeof gameRoot);
+	if(gSwitchFontMapLoaded && strcmp(gameRoot, gSwitchFontMapRoot) == 0)
+		return;
+	Json_Free(gSwitchFontMap);
+	gSwitchFontMap = NULL;
+	gSwitchFontMapBase[0] = 0;
+	snprintf(gSwitchFontMapRoot, sizeof gSwitchFontMapRoot, "%s", gameRoot);
+	gSwitchFontMapLoaded = 1;
+	if(FontMapLoadFromRoot(gameRoot))
+		return;
+	if(strcmp(gameRoot, kSdConfigRoot) != 0)
+		FontMapLoadFromRoot(kSdConfigRoot);
+}
+
+/* Compare face names case-insensitively for ASCII characters, but preserve
+ * exact UTF-8 bytes for non-ASCII Japanese family names. */
+static int FontMapNameEqual(const char* a, const char* b)
+{
+	while(*a && *b)
+	{
+		unsigned char ca = (unsigned char)*a++;
+		unsigned char cb = (unsigned char)*b++;
+		if(ca < 0x80)
+			ca = (unsigned char)tolower(ca);
+		if(cb < 0x80)
+			cb = (unsigned char)tolower(cb);
+		if(ca != cb)
+			return 0;
+	}
+	return *a == 0 && *b == 0;
+}
+
+static int FontMapEntryMatches(const JsonNode_t* entry, const char* requestedUtf8)
+{
+	const JsonNode_t* match = Json_Get(entry, "match");
+	const JsonNode_t* alias;
+	if(!match)
+		return 0;
+	if(match->type == JSON_STRING)
+		return match->str && FontMapNameEqual(match->str, requestedUtf8);
+	if(match->type == JSON_ARRAY)
+	{
+		for(alias = match->child; alias; alias = alias->next)
+			if(alias->type == JSON_STRING && alias->str && FontMapNameEqual(alias->str, requestedUtf8))
+				return 1;
+	}
+	return 0;
+}
+
+/* Resolve a matching map entry to a Switch-native font path and collection
+ * index.  A missing/invalid file is ignored, leaving normal font discovery
+ * as the fallback. */
+static int FontMapResolve(const char* sjisFace, char* out, size_t outSize, int* index)
+{
+	char requestedUtf8[0x400];
+	const JsonNode_t* fonts;
+	const JsonNode_t* entry;
+	if(!sjisFace || !out || outSize == 0 || !index)
+		return 0;
+	out[0] = 0;
+	*index = 0;
+	OsSwitch_SjisToUtf8(sjisFace, requestedUtf8, sizeof requestedUtf8);
+	if(!requestedUtf8[0])
+		return 0;
+	FontMapEnsureLoaded();
+	if(!gSwitchFontMap)
+		return 0;
+	fonts = Json_Get(gSwitchFontMap, "fonts");
+	for(entry = fonts ? fonts->child : NULL; entry; entry = entry->next)
+	{
+		const char* file;
+		char candidate[SWITCH_FONTMAP_PATH_MAX];
+		struct stat st;
+		double faceIndex;
+		if(entry->type != JSON_OBJECT || !FontMapEntryMatches(entry, requestedUtf8))
+			continue;
+		file = Json_String(entry, "file", NULL);
+		if(!file || !*file)
+			continue;
+		if(FontMapIsAbsolute(file))
+		{
+			int written = snprintf(candidate, sizeof candidate, "%s", file);
+			if(written < 0 || (size_t)written >= sizeof candidate)
+				continue;
+		}
+		else if(!FontMapJoin(candidate, sizeof candidate, gSwitchFontMapBase, file))
+			continue;
+		if(stat(candidate, &st) != 0 || S_ISDIR(st.st_mode))
+			continue;
+		faceIndex = Json_Number(entry, "index", 0);
+		if(faceIndex < 0 || faceIndex > 255 || faceIndex != (int)faceIndex)
+			continue;
+		{
+			int written = snprintf(out, outSize, "%s", candidate);
+			if(written < 0 || (size_t)written >= outSize)
+			{
+				out[0] = 0;
+				continue;
+			}
+		}
+		*index = (int)faceIndex;
+		return 1;
+	}
+	return 0;
+}
+// SWITCH_FONTMAP_PATCH_END
+
+
 // a registered file of the requested class, else the first registered one
 static int ResolveRegistered(int mincho, char* out, size_t n)
 {
@@ -222,7 +433,7 @@ static int ResolveByScan(int mincho, char* out, size_t n)
 	return 0;
 }
 
-static int ResolveFace(const char* sjisFace, int bold, int italic, char* out, size_t n, int* index)
+static int ResolveFace(const char* sjisFace, int bold, int italic, char* out, size_t n, int* index, int* mapped)
 {
 	char utf8[0x200];
 	const char* env;
@@ -232,12 +443,18 @@ static int ResolveFace(const char* sjisFace, int bold, int italic, char* out, si
 	OsSwitch_SjisToUtf8(sjisFace ? sjisFace : "", utf8, sizeof utf8);
 	mincho = IsMinchoName(utf8);
 	*index = 0;
+	*mapped = 0;
 	env = getenv(mincho ? "BGI_FONT_MINCHO" : "BGI_FONT_GOTHIC");
 	if(!env || !*env)
 		env = getenv("BGI_FONT");
 	if(env && *env)
 	{
 		snprintf(out, n, "%s", env);
+		return 1;
+	}
+	if(FontMapResolve(sjisFace, out, n, index))
+	{
+		*mapped = 1;
 		return 1;
 	}
 	if(ResolveRegistered(mincho, out, n))
@@ -375,6 +592,7 @@ OsFont_t* OS_FontOpen(const char* face, int height, int width, int bold, int ita
 {
 	char path[1024];
 	int index = 0;
+	int mapped = 0;
 	OsFont_t* f;
 	FT_Face ft;
 	FT_Pos asc, desc, cell, fullAdv;
@@ -382,7 +600,7 @@ OsFont_t* OS_FontOpen(const char* face, int height, int width, int bold, int ita
 
 	if(height <= 0 || !FtInit())
 		return NULL;
-	if(!ResolveFace(face, bold, italic, path, sizeof path, &index))
+	if(!ResolveFace(face, bold, italic, path, sizeof path, &index, &mapped))
 		return NULL;
 	f = (OsFont_t*)calloc(1, sizeof *f);
 	if(!f)
@@ -414,7 +632,10 @@ OsFont_t* OS_FontOpen(const char* face, int height, int width, int bold, int ita
 		fullAdv = ft->glyph->advance.x;
 	if(fullAdv <= 0)
 		fullAdv = ft->units_per_EM;
-	if(width > 0)
+	/* A replacement face has its own natural advance widths.  Do not
+	 * force the original BGI face's width onto it (the Win32 backend uses
+	 * CreateFontW(cWidth = 0) for the same reason). */
+	if(width > 0 && !mapped)
 		f->emW = (FT_F26Dot6)(((int64_t)width * 2 * 64 * ft->units_per_EM + fullAdv / 2) / fullAdv);
 	else
 		f->emW = f->emH;
