@@ -47,7 +47,9 @@ static OsSwitchAudio gAudio;
 
 static const AudioRendererConfig gAudioConfig = {
 	.output_rate = AudioRendererOutputRate_48kHz,
-	.num_voices = 1,
+	/* audrvVoiceInit below creates one stereo voice (two renderer channels).
+	 * libnx's num_voices field also sizes the available channel pool. */
+	.num_voices = 2,
 	.num_effects = 0,
 	.num_sinks = 1,
 	.num_mix_objs = 1,
@@ -168,6 +170,7 @@ int OS_AudioStart(int rate, OsAudioFill_t fill, void* user)
 	rc = audrenInitialize(&gAudioConfig);
 	if(R_FAILED(rc))
 	{
+		OsSwitch_Log("audio: audrenInitialize failed: 0x%x", (unsigned)rc);
 		printf("audio: audrenInitialize failed: 0x%x\n", rc);
 		return 0;
 	}
@@ -176,6 +179,7 @@ int OS_AudioStart(int rate, OsAudioFill_t fill, void* user)
 	rc = audrvCreate(&gAudio.driver, &gAudioConfig, 2);
 	if(R_FAILED(rc))
 	{
+		OsSwitch_Log("audio: audrvCreate failed: 0x%x", (unsigned)rc);
 		printf("audio: audrvCreate failed: 0x%x\n", rc);
 		OS_AudioStop();
 		return 0;
@@ -187,6 +191,7 @@ int OS_AudioStart(int rate, OsAudioFill_t fill, void* user)
 	gAudio.pool = memalign(0x1000, gAudio.poolSize);
 	if(!gAudio.pool)
 	{
+		OsSwitch_Log("audio: wave buffer allocation failed (%lu bytes)", (unsigned long)gAudio.poolSize);
 		printf("audio: wave buffer allocation failed\n");
 		OS_AudioStop();
 		return 0;
@@ -196,16 +201,28 @@ int OS_AudioStart(int rate, OsAudioFill_t fill, void* user)
 	gAudio.poolId = audrvMemPoolAdd(&gAudio.driver, gAudio.pool, gAudio.poolSize);
 	if(gAudio.poolId < 0)
 	{
+		OsSwitch_Log("audio: audrvMemPoolAdd failed");
 		printf("audio: audrvMemPoolAdd failed\n");
 		OS_AudioStop();
 		return 0;
 	}
-	audrvMemPoolAttach(&gAudio.driver, gAudio.poolId);
-	audrvDeviceSinkAdd(&gAudio.driver, AUDREN_DEFAULT_DEVICE_NAME, 2, sinkChannels);
+	if(!audrvMemPoolAttach(&gAudio.driver, gAudio.poolId))
+	{
+		OsSwitch_Log("audio: audrvMemPoolAttach failed (pool=%d)", gAudio.poolId);
+		OS_AudioStop();
+		return 0;
+	}
+	if(audrvDeviceSinkAdd(&gAudio.driver, AUDREN_DEFAULT_DEVICE_NAME, 2, sinkChannels) < 0)
+	{
+		OsSwitch_Log("audio: audrvDeviceSinkAdd failed");
+		OS_AudioStop();
+		return 0;
+	}
 	audrvUpdate(&gAudio.driver);
 	rc = audrenStartAudioRenderer();
 	if(R_FAILED(rc))
 	{
+		OsSwitch_Log("audio: audrenStartAudioRenderer failed: 0x%x", (unsigned)rc);
 		printf("audio: audrenStartAudioRenderer failed: 0x%x\n", rc);
 		OS_AudioStop();
 		return 0;
@@ -213,6 +230,7 @@ int OS_AudioStart(int rate, OsAudioFill_t fill, void* user)
 
 	if(!audrvVoiceInit(&gAudio.driver, 0, 2, PcmFormat_Int16, SWITCH_AUDIO_RATE))
 	{
+		OsSwitch_Log("audio: audrvVoiceInit failed (configured channels=%d, requested stereo=2)", gAudioConfig.num_voices);
 		printf("audio: audrvVoiceInit failed\n");
 		OS_AudioStop();
 		return 0;
@@ -254,6 +272,7 @@ int OS_AudioStart(int rate, OsAudioFill_t fill, void* user)
 		return 0;
 	}
 	gAudio.threadStarted = 1;
+	OsSwitch_Log("audio: started (%d Hz input -> %d Hz output, stereo, %d wave buffers)", gAudio.inRate, SWITCH_AUDIO_RATE, SWITCH_AUDIO_BUFFERS);
 	printf("audio: %d Hz -> %d Hz, %d buffers\n", gAudio.inRate, SWITCH_AUDIO_RATE, SWITCH_AUDIO_BUFFERS);
 	return 1;
 }

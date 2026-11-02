@@ -14,6 +14,13 @@
 #include "bgi/gfx/bmpmgr.h"
 #include "bgi/bfmovie.h"
 
+#if defined(BGI_SWITCH)
+#include "bgi/os_switch.h"
+static uint32_t gSwitchDecodeCount;
+static uint64_t gSwitchDecodeTotalNs;
+static uint64_t gSwitchDecodeMaxNs;
+#endif
+
 typedef struct BmSeq
 {
 	int32_t no;         // the number the scripts use (from gCounter)
@@ -61,6 +68,11 @@ uint32_t BmSeq_Register(const void* data, uint32_t size, int32_t* outNo, int32_t
 	info[2] = (int32_t)h->mode;
 	info[3] = (int32_t)h->fps;
 	info[4] = (int32_t)h->frames;
+#if defined(BGI_SWITCH)
+	OsSwitch_Log("BF_Movie registered: %ux%u bpp=%u mode=%u fps=%u frames=%u type=0x%x size=%u",
+		(unsigned)h->width, (unsigned)h->height, (unsigned)h->bpp, (unsigned)h->mode,
+		(unsigned)h->fps, (unsigned)h->frames, (unsigned)h->type, (unsigned)size);
+#endif
 	return 0;
 }
 
@@ -121,6 +133,9 @@ uint32_t BmSeq_Decode(int bmpNo, int32_t no, uint32_t frame)
 	BmSeq_t* s = Find(no);
 	const BfMovieHeader_t* h;
 	Bmp_t b;
+#if defined(BGI_SWITCH)
+	uint64_t decodeStartNs = OsSwitch_TicksNs();
+#endif
 	if(!s)
 		return 0x80000003u;
 	h = (const BfMovieHeader_t*)s->data;
@@ -142,6 +157,25 @@ uint32_t BmSeq_Decode(int bmpNo, int32_t no, uint32_t frame)
 	}
 	if(!BfMovie_DecodeFrame(s->data, s->size, frame, b.pixels, b.pitch))
 		return 0x80000008u; // (the pool's "decode failed")
+#if defined(BGI_SWITCH)
+	{
+		uint64_t elapsed = OsSwitch_TicksNs() - decodeStartNs;
+		gSwitchDecodeCount++;
+		gSwitchDecodeTotalNs += elapsed;
+		if(elapsed > gSwitchDecodeMaxNs)
+			gSwitchDecodeMaxNs = elapsed;
+		if(gSwitchDecodeCount >= 8)
+		{
+			OsSwitch_Log("BF_Movie decode: %u frames avg %.2f ms max %.2f ms",
+				(unsigned)gSwitchDecodeCount,
+				(double)gSwitchDecodeTotalNs / (double)gSwitchDecodeCount / 1000000.0,
+				(double)gSwitchDecodeMaxNs / 1000000.0);
+			gSwitchDecodeCount = 0;
+			gSwitchDecodeTotalNs = 0;
+			gSwitchDecodeMaxNs = 0;
+		}
+	}
+#endif
 	return 0;
 }
 

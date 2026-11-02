@@ -27,18 +27,26 @@ uint32_t gSwitchFramebufferWidth;
 uint32_t gSwitchFramebufferHeight;
 
 #define SWITCH_FB_COUNT   2
+#define SWITCH_UPLOAD_COUNT 3
 #define SWITCH_CMD_SIZE   (64 * 1024)
 #define SWITCH_FB_FORMAT  DkImageFormat_RGBA8_Unorm
 
-static DkCmdBuf gCmdBuf;
-static DkMemBlock gCmdMem;
-static DkMemBlock gUploadMem;
+static DkCmdBuf gCmdBuf[SWITCH_UPLOAD_COUNT];
+static DkMemBlock gCmdMem[SWITCH_UPLOAD_COUNT];
+static DkMemBlock gUploadMem[SWITCH_UPLOAD_COUNT];
+static DkFence gUploadFence[SWITCH_UPLOAD_COUNT];
+static int gUploadFenceUsed[SWITCH_UPLOAD_COUNT];
+static uint32_t gUploadIndex;
 static DkImageLayout gImageLayout;
 static DkImageView gImageViews[SWITCH_FB_COUNT];
 static uint32_t gUploadSize;
 static int gGraphicsReady;
+static uint64_t gPresentMeasureStart;
+static uint32_t gPresentMeasureCount;
+static int gQueueErrorLogged;
 
-// The linear buffer the window layer draws into (RGBA8 in memory).
+// The CPU-side drawing surface is separate from the upload ring. This keeps
+// the engine from modifying memory while the GPU is still reading it.
 static uint32_t* gFramebuffer;
 static int gPitchPixels;
 
@@ -117,40 +125,55 @@ int OsSwitch_GraphicsInit(int width, int height)
 	}
 	OsSwitch_Log("graphics: dkSwapchainCreate OK");
 
-	// Command memory and command buffer.
-	dkMemBlockMakerDefaults(&memMaker, gSwitchDevice, SWITCH_CMD_SIZE);
-	memMaker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
-	gCmdMem = dkMemBlockCreate(&memMaker);
-	if(!gCmdMem)
+	// Three upload/command slots let the CPU prepare the next frame while the
+	// GPU consumes an earlier one. Each slot's fence protects both its upload
+	// memory and its command memory until the submitted copy has completed.
+	for(i = 0; i < SWITCH_UPLOAD_COUNT; i++)
 	{
-		OsSwitch_Log("graphics: command memory allocation FAILED");
-		printf("graphics: command memory allocation failed\n");
-		OsSwitch_GraphicsShutdown();
-		return 0;
-	}
-	dkCmdBufMakerDefaults(&cmdMaker, gSwitchDevice);
-	gCmdBuf = dkCmdBufCreate(&cmdMaker);
-	if(!gCmdBuf)
-	{
-		OsSwitch_Log("graphics: dkCmdBufCreate FAILED");
-		printf("graphics: dkCmdBufCreate failed\n");
-		OsSwitch_GraphicsShutdown();
-		return 0;
-	}
-	dkCmdBufAddMemory(gCmdBuf, gCmdMem, 0, SWITCH_CMD_SIZE);
+		dkMemBlockMakerDefaults(&memMaker, gSwitchDevice, SWITCH_CMD_SIZE);
+		memMaker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+		gCmdMem[i] = dkMemBlockCreate(&memMaker);
+		if(!gCmdMem[i])
+		{
+			OsSwitch_Log("graphics: command memory allocation FAILED (slot %u)", (unsigned)i);
+			printf("graphics: command memory allocation failed (slot %u)\n", i);
+			OsSwitch_GraphicsShutdown();
+			return 0;
+		}
+		dkCmdBufMakerDefaults(&cmdMaker, gSwitchDevice);
+		gCmdBuf[i] = dkCmdBufCreate(&cmdMaker);
+		if(!gCmdBuf[i])
+		{
+			OsSwitch_Log("graphics: dkCmdBufCreate FAILED (slot %u)", (unsigned)i);
+			printf("graphics: dkCmdBufCreate failed (slot %u)\n", i);
+			OsSwitch_GraphicsShutdown();
+			return 0;
+		}
+		dkCmdBufAddMemory(gCmdBuf[i], gCmdMem[i], 0, SWITCH_CMD_SIZE);
 
-	// The upload buffer: CPU-cached for fast drawing, flushed before each copy.
-	dkMemBlockMakerDefaults(&memMaker, gSwitchDevice, gUploadSize);
-	memMaker.flags = DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached;
-	gUploadMem = dkMemBlockCreate(&memMaker);
-	if(!gUploadMem)
+		dkMemBlockMakerDefaults(&memMaker, gSwitchDevice, gUploadSize);
+		memMaker.flags = DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached;
+		gUploadMem[i] = dkMemBlockCreate(&memMaker);
+		if(!gUploadMem[i])
+		{
+			OsSwitch_Log("graphics: upload buffer allocation FAILED (slot %u)", (unsigned)i);
+			printf("graphics: upload buffer allocation failed (slot %u)\n", i);
+			OsSwitch_GraphicsShutdown();
+			return 0;
+		}
+		gUploadFenceUsed[i] = 0;
+	}
+
+	// Stable software surface. Present copies it into the next available
+	// upload-ring slot before submitting the GPU transfer.
+	gFramebuffer = (uint32_t*)malloc(gUploadSize);
+	if(!gFramebuffer)
 	{
-		OsSwitch_Log("graphics: upload buffer allocation FAILED");
-		printf("graphics: upload buffer allocation failed\n");
+		OsSwitch_Log("graphics: software framebuffer allocation FAILED");
+		printf("graphics: software framebuffer allocation failed\n");
 		OsSwitch_GraphicsShutdown();
 		return 0;
 	}
-	gFramebuffer = (uint32_t*)dkMemBlockGetCpuAddr(gUploadMem);
 	memset(gFramebuffer, 0, gUploadSize);
 
 	// The render queue.
@@ -178,26 +201,42 @@ void OsSwitch_GraphicsShutdown(void)
 {
 	if(gSwitchQueue)
 	{
-		dkQueueWaitIdle(gSwitchQueue);
+		if(!gQueueErrorLogged && !dkQueueIsInErrorState(gSwitchQueue))
+			dkQueueWaitIdle(gSwitchQueue);
 		dkQueueDestroy(gSwitchQueue);
 		gSwitchQueue = NULL;
 	}
-	if(gCmdBuf)
 	{
-		dkCmdBufDestroy(gCmdBuf);
-		gCmdBuf = NULL;
+		uint32_t i;
+		for(i = 0; i < SWITCH_UPLOAD_COUNT; i++)
+		{
+			if(gCmdBuf[i])
+			{
+				dkCmdBufDestroy(gCmdBuf[i]);
+				gCmdBuf[i] = NULL;
+			}
+			if(gCmdMem[i])
+			{
+				dkMemBlockDestroy(gCmdMem[i]);
+				gCmdMem[i] = NULL;
+			}
+			if(gUploadMem[i])
+			{
+				dkMemBlockDestroy(gUploadMem[i]);
+				gUploadMem[i] = NULL;
+			}
+			gUploadFenceUsed[i] = 0;
+		}
 	}
-	if(gCmdMem)
+	if(gFramebuffer)
 	{
-		dkMemBlockDestroy(gCmdMem);
-		gCmdMem = NULL;
-	}
-	if(gUploadMem)
-	{
-		dkMemBlockDestroy(gUploadMem);
-		gUploadMem = NULL;
+		free(gFramebuffer);
 		gFramebuffer = NULL;
 	}
+	gUploadIndex = 0;
+	gPresentMeasureStart = 0;
+	gPresentMeasureCount = 0;
+	gQueueErrorLogged = 0;
 	if(gSwitchSwapchain)
 	{
 		dkSwapchainDestroy(gSwitchSwapchain);
@@ -239,22 +278,51 @@ void OsSwitch_FramebufferClear(uint32_t rgba)
 
 void OsSwitch_GraphicsPresent(void)
 {
-	int slot;
+	int slot, upload;
 	DkCopyBuf src;
 	DkImageRect dst;
+	DkResult waitResult;
+	uint64_t now;
 
 	if(!gGraphicsReady || !gFramebuffer)
 		return;
 
-	// The previous frame may still read the upload buffer.
-	dkQueueWaitIdle(gSwitchQueue);
-	dkMemBlockFlushCpuCache(gUploadMem, 0, gUploadSize);
+	if(gQueueErrorLogged)
+		return; // Once failed, the only legal queue operation is destruction.
+	if(dkQueueIsInErrorState(gSwitchQueue))
+	{
+		gQueueErrorLogged = 1;
+		printf("graphics: deko3d queue entered error state\n");
+		OsSwitch_Log("graphics: deko3d queue entered error state; no more frames submitted");
+		return;
+	}
 
 	slot = dkQueueAcquireImage(gSwitchQueue, gSwitchSwapchain);
 	if(slot < 0 || slot >= SWITCH_FB_COUNT)
 		return;
 
-	src.addr = dkMemBlockGetGpuAddr(gUploadMem);
+	// Reuse a ring slot only after its previous GPU copy has finished. Unlike
+	// dkQueueWaitIdle(), this does not wait for unrelated queue/presentation
+	// work. Static zero-initialized DkFence objects are empty on first use.
+	upload = (int)(gUploadIndex++ % SWITCH_UPLOAD_COUNT);
+	if(gUploadFenceUsed[upload])
+	{
+		waitResult = dkFenceWait(&gUploadFence[upload], -1);
+		if(waitResult != DkResult_Success)
+		{
+			int queueError = dkQueueIsInErrorState(gSwitchQueue) ? 1 : 0;
+			if(queueError)
+				gQueueErrorLogged = 1;
+			OsSwitch_Log("graphics: upload fence wait failed: %d (queue error=%d)",
+				(int)waitResult, queueError);
+			return;
+		}
+	}
+
+	memcpy(dkMemBlockGetCpuAddr(gUploadMem[upload]), gFramebuffer, gUploadSize);
+	dkMemBlockFlushCpuCache(gUploadMem[upload], 0, gUploadSize);
+
+	src.addr = dkMemBlockGetGpuAddr(gUploadMem[upload]);
 	src.rowLength = 0;   // tightly packed
 	src.imageHeight = 0; // the rectangle's height
 
@@ -265,8 +333,28 @@ void OsSwitch_GraphicsPresent(void)
 	dst.height = gSwitchFramebufferHeight;
 	dst.depth = 1;
 
-	dkCmdBufClear(gCmdBuf);
-	dkCmdBufCopyBufferToImage(gCmdBuf, &src, &gImageViews[slot], &dst, 0);
-	dkQueueSubmitCommands(gSwitchQueue, dkCmdBufFinishList(gCmdBuf));
+	dkCmdBufClear(gCmdBuf[upload]);
+	dkCmdBufCopyBufferToImage(gCmdBuf[upload], &src, &gImageViews[slot], &dst, 0);
+	dkQueueSubmitCommands(gSwitchQueue, dkCmdBufFinishList(gCmdBuf[upload]));
+	// This fence covers the transfer and command memory, not the display's
+	// scanout. dkQueuePresentImage adds its own presentation fence and flush.
+	dkQueueSignalFence(gSwitchQueue, &gUploadFence[upload], false);
+	gUploadFenceUsed[upload] = 1;
 	dkQueuePresentImage(gSwitchQueue, gSwitchSwapchain, slot);
+
+	// A one-second rolling count distinguishes a slow software renderer from
+	// a queue that is itself falling behind. Kept in startup.log by the earlier
+	// diagnostics patch.
+	now = OsSwitch_TicksNs();
+	if(!gPresentMeasureStart)
+		gPresentMeasureStart = now;
+	gPresentMeasureCount++;
+	if(now - gPresentMeasureStart >= 1000000000ull)
+	{
+		OsSwitch_Log("graphics: %.1f presents/s; queue error=%d",
+			(double)gPresentMeasureCount * 1000000000.0 / (double)(now - gPresentMeasureStart),
+			dkQueueIsInErrorState(gSwitchQueue) ? 1 : 0);
+		gPresentMeasureCount = 0;
+		gPresentMeasureStart = now;
+	}
 }

@@ -70,7 +70,7 @@ int OS_PlaySoundFile(const char* path)
 
 int OS_MovieOpen(const char* path)
 {
-	BGI_UNUSED(path);
+	OsSwitch_Log("OS_MovieOpen: no native Switch video backend; path='%s'", path ? path : "");
 	return OS_MOVIE_FAILED;
 }
 
@@ -127,7 +127,7 @@ void OS_ProcessClose(OsProcess_t* p)
 
 OsPipeProc_t* OS_PipeProcStart(const char* const* argv)
 {
-	BGI_UNUSED(argv);
+	OsSwitch_Log("OS_PipeProcStart: external process backend unavailable; program='%s'", argv && argv[0] ? argv[0] : "");
 	return NULL;
 }
 
