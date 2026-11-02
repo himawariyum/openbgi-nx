@@ -26,8 +26,17 @@ extern uint32_t gSwitchFramebufferHeight;
 int OsSwitch_GraphicsInit(int width, int height);
 void OsSwitch_GraphicsShutdown(void);
 
+// Optional direct-to-swapchain 2D blitter. Source pixels are converted to
+// RGBA8 in a fenced upload slot; Deko3D's 2D engine performs the scaling.
+int OsSwitch_GraphicsBeginFrame(void);
+int OsSwitch_GraphicsFillBlack(void);
+int OsSwitch_GraphicsBlit(const void* pixels, int pitch, int bpp, int surfaceW, int surfaceH,
+	int srcX, int srcY, int srcW, int srcH, int dstX, int dstY, int dstW, int dstH);
+void OsSwitch_WindowCompositeChildrenGpu(void);
+
 // Upload the software framebuffer (0xAABBGGRR pixels, RGBA in memory) and
-// present it.  Safe to call when graphics are not initialised.
+// present it. When the optional GPU blitter has begun a frame, this presents
+// the queued 2D blits instead. Safe to call when graphics are not initialised.
 void OsSwitch_GraphicsPresent(void);
 
 // The software framebuffer the window layer draws into.

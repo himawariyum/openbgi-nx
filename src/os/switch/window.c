@@ -19,6 +19,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef BGI_SWITCH_GPU_BLIT
+#define BGI_SWITCH_GPU_BLIT 0
+#endif
+
 #define SWITCH_SCREEN_W 1280
 #define SWITCH_SCREEN_H 720
 
@@ -186,6 +190,25 @@ static void BlitSurface(const struct OsSwitchDc* dc, int dstX, int dstY, int dst
 	h = cb - ct;
 	if(w <= 0 || h <= 0)
 		return;
+
+#if BGI_SWITCH_GPU_BLIT
+	{
+		int sx0, sy0, sx1, sy1;
+		fx = (double)srcW / (double)(wx1 - wx0);
+		fy = (double)srcH / (double)(wy1 - wy0);
+		sx0 = srcX + (int)((double)(cl - wx0) * fx);
+		sy0 = srcY + (int)((double)(ct - wy0) * fy);
+		sx1 = srcX + (int)((double)(cr - wx0) * fx + 0.999999);
+		sy1 = srcY + (int)((double)(cb - wy0) * fy + 0.999999);
+		if(sx0 < srcX) sx0 = srcX;
+		if(sy0 < srcY) sy0 = srcY;
+		if(sx1 > srcX + srcW) sx1 = srcX + srcW;
+		if(sy1 > srcY + srcH) sy1 = srcY + srcH;
+		if(sx1 > sx0 && sy1 > sy0 && OsSwitch_GraphicsBlit(s->pixels, s->pitch, s->bpp,
+			s->width, s->height, sx0, sy0, sx1 - sx0, sy1 - sy0, cl, ct, w, h))
+			return;
+	}
+#endif
 
 	fx = (double)srcW / (double)(wx1 - wx0);
 	fy = (double)srcH / (double)(wy1 - wy0);
@@ -428,6 +451,10 @@ void OS_WindowSetPicture(int w, int h)
 
 OsDc_t* OS_WindowGetDc(void)
 {
+#if BGI_SWITCH_GPU_BLIT
+	if(gAlive)
+		OsSwitch_GraphicsBeginFrame();
+#endif
 	return gAlive ? (OsDc_t*)&gMainDc : NULL;
 }
 
@@ -460,6 +487,10 @@ void OS_StretchToWindow(OsDc_t* dc, int dstX, int dstY, int dstW, int dstH, cons
 
 void OS_WindowFillBlack(void)
 {
+#if BGI_SWITCH_GPU_BLIT
+	if(OsSwitch_GraphicsFillBlack())
+		return;
+#endif
 	OsSwitch_FramebufferClear(0xff000000u);
 }
 
@@ -759,7 +790,7 @@ static void BlitChild(struct OsSwitchChild* c, int dstX, int dstY, int dstW, int
 				continue;
 			if(sx >= srcX + srcW)
 				sx = srcX + srcW - 1;
-			c->pixels[(size_t)dy * (size_t)c->w + dx] = PackPixel(SurfacePixel(s, sx, sy));
+			c->pixels[(size_t)dy * (size_t)c->w + dx] = SurfacePixel(s, sx, sy);
 		}
 	}
 }
@@ -783,7 +814,7 @@ static void CompositeChild(struct OsSwitchChild* c)
 			int sx = OsSwitch_ModeToScreenX(c->x + x);
 			if(sx < 0 || sx >= fw)
 				continue;
-			fb[(size_t)sy * (size_t)pitch + sx] = c->pixels[(size_t)y * (size_t)c->w + x];
+			fb[(size_t)sy * (size_t)pitch + sx] = PackPixel(c->pixels[(size_t)y * (size_t)c->w + x]);
 		}
 	}
 }
@@ -912,4 +943,45 @@ int OS_DebugWindowAlive(void)
 void OS_DebugWindowPresent(const OsSurface_t* s)
 {
 	BGI_UNUSED(s);
+}
+
+void OsSwitch_WindowCompositeChildrenGpu(void)
+{
+#if BGI_SWITCH_GPU_BLIT
+	int i;
+	for(i = 0; i < SWITCH_CHILD_MAX; i++)
+	{
+		struct OsSwitchChild* c = &gChildren[i];
+		int x0, y0, x1, y1, cl, ct, cr, cb;
+		double fx, fy;
+		int sx0, sy0, sx1, sy1;
+		if(!c->used || !c->shown)
+			continue;
+		x0 = OsSwitch_ModeToScreenX(c->x);
+		y0 = OsSwitch_ModeToScreenY(c->y);
+		x1 = OsSwitch_ModeToScreenX(c->x + c->w);
+		y1 = OsSwitch_ModeToScreenY(c->y + c->h);
+		if(x1 <= x0 || y1 <= y0)
+			continue;
+		cl = x0 < 0 ? 0 : x0;
+		ct = y0 < 0 ? 0 : y0;
+		cr = x1 > (int)gSwitchFramebufferWidth ? (int)gSwitchFramebufferWidth : x1;
+		cb = y1 > (int)gSwitchFramebufferHeight ? (int)gSwitchFramebufferHeight : y1;
+		if(cr <= cl || cb <= ct)
+			continue;
+		fx = (double)c->w / (double)(x1 - x0);
+		fy = (double)c->h / (double)(y1 - y0);
+		sx0 = (int)((cl - x0) * fx);
+		sy0 = (int)((ct - y0) * fy);
+		sx1 = (int)((cr - x0) * fx + 0.999999);
+		sy1 = (int)((cb - y0) * fy + 0.999999);
+		if(sx0 < 0) sx0 = 0;
+		if(sy0 < 0) sy0 = 0;
+		if(sx1 > c->w) sx1 = c->w;
+		if(sy1 > c->h) sy1 = c->h;
+		if(sx1 > sx0 && sy1 > sy0)
+			OsSwitch_GraphicsBlit(c->pixels, c->w * 4, 32, c->w, c->h,
+				sx0, sy0, sx1 - sx0, sy1 - sy0, cl, ct, cr - cl, cb - ct);
+	}
+#endif
 }

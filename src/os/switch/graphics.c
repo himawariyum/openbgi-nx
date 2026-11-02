@@ -2,14 +2,13 @@
  * This file is part of OpenBGI (https://openbgi.net).
  * SPDX-License-Identifier: GPL-2.0-only
  *
- * graphics.c - Switch back end: the deko3d device, the swapchain and the
- *              software framebuffer the window layer draws into.
+ * graphics.c - Switch back end: the deko3d device, the swapchain, the
+ *              software fallback framebuffer and optional 2D blitter.
  *
- * The engine draws into plain memory.  OsSwitch_Framebuffer() hands that
- * memory out; OsSwitch_GraphicsPresent() copies it into the acquired
- * swapchain image with the 2D engine (dkCmdBufCopyBufferToImage) and
- * presents it.  There are no shaders and no render pass: one linear
- * RGBA8 buffer is all this back end needs.
+ * The default path uploads the software framebuffer to the swapchain.
+ * BGI_SWITCH_GPU_BLIT preserves the previous swapchain image, then uploads
+ * individual dirty surfaces to a reusable image and scales them into the
+ * acquired image with the 2D engine.
  */
 #include "bgi/os.h"
 #include "bgi/os_switch.h"
@@ -17,6 +16,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef BGI_SWITCH_GPU_BLIT
+#define BGI_SWITCH_GPU_BLIT 0
+#endif
 
 DkDevice gSwitchDevice;
 DkQueue gSwitchQueue;
@@ -30,6 +33,10 @@ uint32_t gSwitchFramebufferHeight;
 #define SWITCH_UPLOAD_COUNT 3
 #define SWITCH_CMD_SIZE   (64 * 1024)
 #define SWITCH_FB_FORMAT  DkImageFormat_RGBA8_Unorm
+#define SWITCH_BLIT_MAX_WIDTH  1920
+#define SWITCH_BLIT_MAX_HEIGHT 1080
+#define SWITCH_BLIT_UPLOAD_SIZE (SWITCH_BLIT_MAX_WIDTH * SWITCH_BLIT_MAX_HEIGHT * 4u)
+#define SWITCH_BLIT_BLACK_SIZE 64
 
 static DkCmdBuf gCmdBuf[SWITCH_UPLOAD_COUNT];
 static DkMemBlock gCmdMem[SWITCH_UPLOAD_COUNT];
@@ -39,11 +46,25 @@ static int gUploadFenceUsed[SWITCH_UPLOAD_COUNT];
 static uint32_t gUploadIndex;
 static DkImageLayout gImageLayout;
 static DkImageView gImageViews[SWITCH_FB_COUNT];
+static DkImageLayout gBlitImageLayout;
+static DkImageLayout gBlackImageLayout;
+static DkImage gBlitImage;
+static DkImage gBlackImage;
+static DkImageView gBlitImageView;
+static DkImageView gBlackImageView;
+static DkMemBlock gBlitMem;
 static uint32_t gUploadSize;
 static int gGraphicsReady;
 static uint64_t gPresentMeasureStart;
 static uint32_t gPresentMeasureCount;
 static int gQueueErrorLogged;
+static int gGpuBlitReady;
+static int gFrameActive, gFrameInitialized, gFrameImageSlot = -1;
+static int gLastPresentedValid, gLastPresentedSlot = -1;
+static int gFrameUploadSlot = -1;
+static uint32_t gFrameUploadOffset;
+
+static int OsSwitch_GraphicsAcquireUploadSlot(void);
 
 // The CPU-side drawing surface is separate from the upload ring. This keeps
 // the engine from modifying memory while the GPU is still reading it.
@@ -58,7 +79,11 @@ int OsSwitch_GraphicsInit(int width, int height)
 	DkSwapchainMaker swapMaker;
 	DkCmdBufMaker cmdMaker;
 	DkImage const* images[SWITCH_FB_COUNT];
-	uint32_t imageSize, imageAlign, i;
+	uint32_t imageSize, imageAlign, i, uploadBufferSize;
+#if BGI_SWITCH_GPU_BLIT
+	DkImageLayoutMaker blitLayoutMaker, blackLayoutMaker;
+	uint32_t blitSize, blitAlign, blackSize, blackAlign, blackOffset, blitMemSize;
+#endif
 
 	if(gGraphicsReady)
 		return 1;
@@ -73,6 +98,11 @@ int OsSwitch_GraphicsInit(int width, int height)
 	gSwitchFramebufferHeight = (uint32_t)height;
 	gPitchPixels = width;
 	gUploadSize = (uint32_t)width * (uint32_t)height * 4u;
+#if BGI_SWITCH_GPU_BLIT
+	uploadBufferSize = SWITCH_BLIT_UPLOAD_SIZE;
+#else
+	uploadBufferSize = gUploadSize;
+#endif
 
 	dkDeviceMakerDefaults(&deviceMaker);
 	gSwitchDevice = dkDeviceCreate(&deviceMaker);
@@ -86,7 +116,7 @@ int OsSwitch_GraphicsInit(int width, int height)
 
 	// Image layout shared by the swapchain images.
 	dkImageLayoutMakerDefaults(&layoutMaker, gSwitchDevice);
-	layoutMaker.flags = DkImageFlags_UsageRender | DkImageFlags_UsagePresent;
+	layoutMaker.flags = DkImageFlags_UsageRender | DkImageFlags_UsagePresent | DkImageFlags_Usage2DEngine;
 	layoutMaker.format = SWITCH_FB_FORMAT;
 	layoutMaker.dimensions[0] = gSwitchFramebufferWidth;
 	layoutMaker.dimensions[1] = gSwitchFramebufferHeight;
@@ -125,6 +155,49 @@ int OsSwitch_GraphicsInit(int width, int height)
 	}
 	OsSwitch_Log("graphics: dkSwapchainCreate OK");
 
+#if BGI_SWITCH_GPU_BLIT
+	// One reusable source image is safe here: each submitted command list
+	// copies its staging slot into this image and blits it before the next
+	// command list overwrites it. Queue order preserves the copy/blit sequence.
+	dkImageLayoutMakerDefaults(&blitLayoutMaker, gSwitchDevice);
+	blitLayoutMaker.flags = DkImageFlags_Usage2DEngine;
+	blitLayoutMaker.format = SWITCH_FB_FORMAT;
+	blitLayoutMaker.dimensions[0] = SWITCH_BLIT_MAX_WIDTH;
+	blitLayoutMaker.dimensions[1] = SWITCH_BLIT_MAX_HEIGHT;
+	dkImageLayoutInitialize(&gBlitImageLayout, &blitLayoutMaker);
+	blitSize = (uint32_t)dkImageLayoutGetSize(&gBlitImageLayout);
+	blitAlign = dkImageLayoutGetAlignment(&gBlitImageLayout);
+	blitSize = (blitSize + blitAlign - 1) & ~(blitAlign - 1);
+
+	dkImageLayoutMakerDefaults(&blackLayoutMaker, gSwitchDevice);
+	blackLayoutMaker.flags = DkImageFlags_Usage2DEngine;
+	blackLayoutMaker.format = SWITCH_FB_FORMAT;
+	blackLayoutMaker.dimensions[0] = SWITCH_BLIT_BLACK_SIZE;
+	blackLayoutMaker.dimensions[1] = SWITCH_BLIT_BLACK_SIZE;
+	dkImageLayoutInitialize(&gBlackImageLayout, &blackLayoutMaker);
+	blackSize = (uint32_t)dkImageLayoutGetSize(&gBlackImageLayout);
+	blackAlign = dkImageLayoutGetAlignment(&gBlackImageLayout);
+	blackSize = (blackSize + blackAlign - 1) & ~(blackAlign - 1);
+	blackOffset = (blitSize + blackAlign - 1) & ~(blackAlign - 1);
+	blitMemSize = blackOffset + blackSize;
+	blitMemSize = (blitMemSize + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
+	dkMemBlockMakerDefaults(&memMaker, gSwitchDevice, blitMemSize);
+	memMaker.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
+	gBlitMem = dkMemBlockCreate(&memMaker);
+	if(gBlitMem)
+	{
+		dkImageInitialize(&gBlitImage, &gBlitImageLayout, gBlitMem, 0);
+		dkImageViewDefaults(&gBlitImageView, &gBlitImage);
+		dkImageInitialize(&gBlackImage, &gBlackImageLayout, gBlitMem, blackOffset);
+		dkImageViewDefaults(&gBlackImageView, &gBlackImage);
+	}
+	else
+	{
+		uploadBufferSize = gUploadSize;
+		OsSwitch_Log("graphics: GPU blitter image allocation failed; using CPU fallback");
+	}
+#endif
+
 	// Three upload/command slots let the CPU prepare the next frame while the
 	// GPU consumes an earlier one. Each slot's fence protects both its upload
 	// memory and its command memory until the submitted copy has completed.
@@ -151,7 +224,7 @@ int OsSwitch_GraphicsInit(int width, int height)
 		}
 		dkCmdBufAddMemory(gCmdBuf[i], gCmdMem[i], 0, SWITCH_CMD_SIZE);
 
-		dkMemBlockMakerDefaults(&memMaker, gSwitchDevice, gUploadSize);
+		dkMemBlockMakerDefaults(&memMaker, gSwitchDevice, uploadBufferSize);
 		memMaker.flags = DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached;
 		gUploadMem[i] = dkMemBlockCreate(&memMaker);
 		if(!gUploadMem[i])
@@ -192,6 +265,36 @@ int OsSwitch_GraphicsInit(int width, int height)
 	}
 
 	gGraphicsReady = 1;
+
+#if BGI_SWITCH_GPU_BLIT
+	if(gBlitMem)
+	{
+		DkCopyBuf blackSource;
+		DkImageRect blackRect = {0, 0, 0, SWITCH_BLIT_BLACK_SIZE, SWITCH_BLIT_BLACK_SIZE, 1};
+		uint32_t* pixels = (uint32_t*)dkMemBlockGetCpuAddr(gUploadMem[0]);
+		uint32_t n;
+		for(n = 0; n < SWITCH_BLIT_BLACK_SIZE * SWITCH_BLIT_BLACK_SIZE; n++)
+			pixels[n] = 0xff000000u;
+		dkMemBlockFlushCpuCache(gUploadMem[0], 0,
+			SWITCH_BLIT_BLACK_SIZE * SWITCH_BLIT_BLACK_SIZE * 4u);
+		blackSource.addr = dkMemBlockGetGpuAddr(gUploadMem[0]);
+		blackSource.rowLength = 0;
+		blackSource.imageHeight = 0;
+		dkCmdBufClear(gCmdBuf[0]);
+		dkCmdBufCopyBufferToImage(gCmdBuf[0], &blackSource, &gBlackImageView, &blackRect, 0);
+		dkQueueSubmitCommands(gSwitchQueue, dkCmdBufFinishList(gCmdBuf[0]));
+		dkQueueWaitIdle(gSwitchQueue);
+		if(!dkQueueIsInErrorState(gSwitchQueue))
+		{
+			gGpuBlitReady = 1;
+			OsSwitch_Log("graphics: hardware 2D blitter ready (%ux%u max source)",
+				(unsigned)SWITCH_BLIT_MAX_WIDTH, (unsigned)SWITCH_BLIT_MAX_HEIGHT);
+		}
+		else
+			OsSwitch_Log("graphics: hardware 2D blitter init failed; using CPU fallback");
+	}
+#endif
+
 	OsSwitch_Log("graphics: ready (%ux%u)", gSwitchFramebufferWidth, gSwitchFramebufferHeight);
 	printf("graphics: %ux%u deko3d swapchain ready\n", gSwitchFramebufferWidth, gSwitchFramebufferHeight);
 	return 1;
@@ -247,12 +350,25 @@ void OsSwitch_GraphicsShutdown(void)
 		dkMemBlockDestroy(gSwitchImageMemBlock);
 		gSwitchImageMemBlock = NULL;
 	}
+	if(gBlitMem)
+	{
+		dkMemBlockDestroy(gBlitMem);
+		gBlitMem = NULL;
+	}
 	if(gSwitchDevice)
 	{
 		dkDeviceDestroy(gSwitchDevice);
 		gSwitchDevice = NULL;
 	}
 	gGraphicsReady = 0;
+	gGpuBlitReady = 0;
+	gFrameActive = 0;
+	gFrameInitialized = 0;
+	gFrameImageSlot = -1;
+	gLastPresentedValid = 0;
+	gLastPresentedSlot = -1;
+	gFrameUploadSlot = -1;
+	gFrameUploadOffset = 0;
 }
 
 uint32_t* OsSwitch_Framebuffer(int* pitchPixels, int* width, int* height)
@@ -276,16 +392,323 @@ void OsSwitch_FramebufferClear(uint32_t rgba)
 		gFramebuffer[i] = rgba;
 }
 
+static int OsSwitch_GraphicsAcquireUploadSlot(void)
+{
+	int upload = (int)(gUploadIndex++ % SWITCH_UPLOAD_COUNT);
+	if(gUploadFenceUsed[upload])
+	{
+		DkResult waitResult;
+		// A queue flush is required before waiting for a fence belonging to
+		// commands which have not yet been flushed by present.
+		dkQueueFlush(gSwitchQueue);
+		waitResult = dkFenceWait(&gUploadFence[upload], -1);
+		if(waitResult != DkResult_Success)
+		{
+			int queueError = dkQueueIsInErrorState(gSwitchQueue) ? 1 : 0;
+			if(queueError)
+				gQueueErrorLogged = 1;
+			OsSwitch_Log("graphics: blit upload fence wait failed: %d (queue error=%d)",
+				(int)waitResult, queueError);
+			return -1;
+		}
+	}
+	return upload;
+}
+
+static void OsSwitch_GraphicsSubmitUploadSlot(int upload)
+{
+	dkQueueSubmitCommands(gSwitchQueue, dkCmdBufFinishList(gCmdBuf[upload]));
+	dkQueueSignalFence(gSwitchQueue, &gUploadFence[upload], false);
+	gUploadFenceUsed[upload] = 1;
+}
+
+static int OsSwitch_GraphicsQueueBlack(void)
+{
+	DkImageRect srcRect = {0, 0, 0, SWITCH_BLIT_BLACK_SIZE, SWITCH_BLIT_BLACK_SIZE, 1};
+	DkImageRect dstRect = {0, 0, 0, gSwitchFramebufferWidth, gSwitchFramebufferHeight, 1};
+	if(!gGpuBlitReady || !gFrameActive || gFrameUploadSlot < 0)
+		return 0;
+	dkCmdBufBlitImage(gCmdBuf[gFrameUploadSlot], &gBlackImageView, &srcRect,
+		&gImageViews[gFrameImageSlot], &dstRect,
+		DkBlitFlag_ModeBlit | DkBlitFlag_FilterNearest, 0);
+	gFrameInitialized = 1;
+	return 1;
+}
+
+static int OsSwitch_GraphicsCopyPreviousFrame(void)
+{
+	DkImageRect rect = {0, 0, 0, gSwitchFramebufferWidth, gSwitchFramebufferHeight, 1};
+	if(!gLastPresentedValid || gLastPresentedSlot == gFrameImageSlot)
+	{
+		gFrameInitialized = 1; // the acquired slot already contains the last frame
+		return 1;
+	}
+	if(gFrameUploadSlot < 0)
+		return 0;
+	dkCmdBufCopyImage(gCmdBuf[gFrameUploadSlot], &gImageViews[gLastPresentedSlot], &rect,
+		&gImageViews[gFrameImageSlot], &rect, 0);
+	gFrameInitialized = 1;
+	return 1;
+}
+
+int OsSwitch_GraphicsBeginFrame(void)
+{
+	int slot;
+	if(!gGraphicsReady || !gGpuBlitReady)
+		return 0;
+	if(gFrameActive)
+		return 1;
+	if(gQueueErrorLogged || dkQueueIsInErrorState(gSwitchQueue))
+	{
+		gQueueErrorLogged = 1;
+		return 0;
+	}
+	slot = dkQueueAcquireImage(gSwitchQueue, gSwitchSwapchain);
+	if(slot < 0 || slot >= SWITCH_FB_COUNT)
+		return 0;
+	gFrameImageSlot = slot;
+	gFrameActive = 1;
+	gFrameInitialized = 0;
+	gFrameUploadSlot = OsSwitch_GraphicsAcquireUploadSlot();
+	gFrameUploadOffset = 0;
+	if(gFrameUploadSlot < 0)
+	{
+		gFrameActive = 0;
+		gFrameImageSlot = -1;
+		return 0;
+	}
+	dkCmdBufClear(gCmdBuf[gFrameUploadSlot]);
+	if(gLastPresentedValid)
+	{
+		if(!OsSwitch_GraphicsCopyPreviousFrame())
+		{
+			gFrameActive = 0;
+			gFrameImageSlot = -1;
+			return 0;
+		}
+	}
+	else if(!OsSwitch_GraphicsQueueBlack())
+	{
+		gFrameActive = 0;
+		gFrameImageSlot = -1;
+		return 0;
+	}
+	return 1;
+}
+
+int OsSwitch_GraphicsFillBlack(void)
+{
+	if(!OsSwitch_GraphicsBeginFrame())
+		return 0;
+	return OsSwitch_GraphicsQueueBlack();
+}
+
+static uint32_t OsSwitch_SurfaceRgb(const void* pixels, int pitch, int bpp, int x, int y)
+{
+	const uint8_t* row = (const uint8_t*)pixels + (size_t)y * (size_t)pitch;
+	if(bpp == 16)
+	{
+		uint16_t v = *(const uint16_t*)(const void*)(row + (size_t)x * 2);
+		uint32_t r = (v >> 10) & 0x1f, g = (v >> 5) & 0x1f, b = v & 0x1f;
+		r = (r << 3) | (r >> 2);
+		g = (g << 3) | (g >> 2);
+		b = (b << 3) | (b >> 2);
+		return (r << 16) | (g << 8) | b;
+	}
+	return (*(const uint32_t*)(const void*)(row + (size_t)x * 4)) & 0x00ffffffu;
+}
+
+static uint32_t OsSwitch_PackRgb(uint32_t rgb)
+{
+	return 0xff000000u | ((rgb & 0xffu) << 16) | (rgb & 0x0000ff00u) | ((rgb >> 16) & 0xffu);
+}
+
+static uint32_t OsSwitch_LerpRgb(uint32_t a, uint32_t b, float t)
+{
+	uint32_t r = (uint32_t)((float)((a >> 16) & 255u) * (1.0f - t) + (float)((b >> 16) & 255u) * t + 0.5f);
+	uint32_t g = (uint32_t)((float)((a >> 8) & 255u) * (1.0f - t) + (float)((b >> 8) & 255u) * t + 0.5f);
+	uint32_t bl = (uint32_t)((float)(a & 255u) * (1.0f - t) + (float)(b & 255u) * t + 0.5f);
+	return (r << 16) | (g << 8) | bl;
+}
+
+static void OsSwitch_PackSurface(const void* pixels, int pitch, int bpp,
+	int srcX, int srcY, int srcW, int srcH, uint32_t* output, int outW, int outH)
+{
+	int x, y;
+	if(srcW == outW && srcH == outH)
+	{
+		for(y = 0; y < outH; y++)
+		{
+			for(x = 0; x < outW; x++)
+				output[(size_t)y * (size_t)outW + x] = OsSwitch_PackRgb(
+					OsSwitch_SurfaceRgb(pixels, pitch, bpp, srcX + x, srcY + y));
+		}
+		return;
+	}
+	// Extremely large source rectangles are reduced once on the CPU to fit
+	// the scratch image. Normal-sized surfaces are uploaded without resampling.
+	for(y = 0; y < outH; y++)
+	{
+		float fy = ((float)y + 0.5f) * (float)srcH / (float)outH - 0.5f;
+		int y0, y1;
+		float ty;
+		if(fy < 0.0f) fy = 0.0f;
+		if(fy > (float)(srcH - 1)) fy = (float)(srcH - 1);
+		y0 = (int)fy;
+		y1 = y0 + 1 < srcH ? y0 + 1 : y0;
+		ty = fy - (float)y0;
+		for(x = 0; x < outW; x++)
+		{
+			float fx = ((float)x + 0.5f) * (float)srcW / (float)outW - 0.5f;
+			int x0, x1;
+			float tx;
+			uint32_t p00, p10, p01, p11, top, bottom;
+			if(fx < 0.0f) fx = 0.0f;
+			if(fx > (float)(srcW - 1)) fx = (float)(srcW - 1);
+			x0 = (int)fx;
+			x1 = x0 + 1 < srcW ? x0 + 1 : x0;
+			tx = fx - (float)x0;
+			p00 = OsSwitch_SurfaceRgb(pixels, pitch, bpp, srcX + x0, srcY + y0);
+			p10 = OsSwitch_SurfaceRgb(pixels, pitch, bpp, srcX + x1, srcY + y0);
+			p01 = OsSwitch_SurfaceRgb(pixels, pitch, bpp, srcX + x0, srcY + y1);
+			p11 = OsSwitch_SurfaceRgb(pixels, pitch, bpp, srcX + x1, srcY + y1);
+			top = OsSwitch_LerpRgb(p00, p10, tx);
+			bottom = OsSwitch_LerpRgb(p01, p11, tx);
+			output[(size_t)y * (size_t)outW + x] = OsSwitch_PackRgb(OsSwitch_LerpRgb(top, bottom, ty));
+		}
+	}
+}
+
+int OsSwitch_GraphicsBlit(const void* pixels, int pitch, int bpp, int surfaceW, int surfaceH,
+	int srcX, int srcY, int srcW, int srcH, int dstX, int dstY, int dstW, int dstH)
+{
+	int upload, outW, outH;
+	uint32_t bytes, uploadOffset;
+	uint32_t* uploadPixels;
+	DkCopyBuf src;
+	DkImageRect srcRect, dstRect;
+	uint32_t filter;
+	if(!pixels || pitch <= 0 || (bpp != 16 && bpp != 32) || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0)
+		return 0;
+	if(srcX < 0 || srcY < 0 || srcX + srcW > surfaceW || srcY + srcH > surfaceH)
+		return 0;
+	if(dstX < 0 || dstY < 0 || dstX + dstW > (int)gSwitchFramebufferWidth ||
+		dstY + dstH > (int)gSwitchFramebufferHeight)
+		return 0;
+	if(!OsSwitch_GraphicsBeginFrame())
+		return 0;
+	if(!gFrameInitialized && !OsSwitch_GraphicsQueueBlack())
+		return 0;
+
+	outW = srcW;
+	outH = srcH;
+	if(outW > SWITCH_BLIT_MAX_WIDTH || outH > SWITCH_BLIT_MAX_HEIGHT)
+	{
+		float scaleX = (float)SWITCH_BLIT_MAX_WIDTH / (float)outW;
+		float scaleY = (float)SWITCH_BLIT_MAX_HEIGHT / (float)outH;
+		float scale = scaleX < scaleY ? scaleX : scaleY;
+		outW = (int)((float)outW * scale + 0.5f);
+		outH = (int)((float)outH * scale + 0.5f);
+		if(outW < 1) outW = 1;
+		if(outH < 1) outH = 1;
+	}
+	bytes = (uint32_t)outW * (uint32_t)outH * 4u;
+	if(bytes > SWITCH_BLIT_UPLOAD_SIZE)
+		return 0;
+
+	bytes = (bytes + 0x3fu) & ~0x3fu;
+	if(gFrameUploadSlot < 0)
+		return 0;
+	uploadOffset = (gFrameUploadOffset + 0x3fu) & ~0x3fu;
+	if(uploadOffset + bytes > SWITCH_BLIT_UPLOAD_SIZE)
+	{
+		// Submit this batch and continue in another fenced slot. This keeps
+		// dirty-rectangle frames to one command submission in the usual case.
+		OsSwitch_GraphicsSubmitUploadSlot(gFrameUploadSlot);
+		upload = OsSwitch_GraphicsAcquireUploadSlot();
+		if(upload < 0)
+			return 0;
+		gFrameUploadSlot = upload;
+		gFrameUploadOffset = 0;
+		uploadOffset = 0;
+		dkCmdBufClear(gCmdBuf[upload]);
+	}
+	upload = gFrameUploadSlot;
+	uploadPixels = (uint32_t*)((uint8_t*)dkMemBlockGetCpuAddr(gUploadMem[upload]) + uploadOffset);
+	OsSwitch_PackSurface(pixels, pitch, bpp, srcX, srcY, srcW, srcH, uploadPixels, outW, outH);
+	dkMemBlockFlushCpuCache(gUploadMem[upload], uploadOffset, bytes);
+	gFrameUploadOffset = uploadOffset + bytes;
+
+	src.addr = dkMemBlockGetGpuAddr(gUploadMem[upload]) + uploadOffset;
+	src.rowLength = 0;
+	src.imageHeight = 0;
+	srcRect.x = 0; srcRect.y = 0; srcRect.z = 0;
+	srcRect.width = (uint32_t)outW; srcRect.height = (uint32_t)outH; srcRect.depth = 1;
+	dstRect.x = (uint32_t)dstX; dstRect.y = (uint32_t)dstY; dstRect.z = 0;
+	dstRect.width = (uint32_t)dstW; dstRect.height = (uint32_t)dstH; dstRect.depth = 1;
+	filter = DkBlitFlag_ModeBlit;
+	filter |= (outW != dstW || outH != dstH) ? DkBlitFlag_FilterLinear : DkBlitFlag_FilterNearest;
+
+	dkCmdBufCopyBufferToImage(gCmdBuf[upload], &src, &gBlitImageView, &srcRect, 0);
+	dkCmdBufBlitImage(gCmdBuf[upload], &gBlitImageView, &srcRect,
+		&gImageViews[gFrameImageSlot], &dstRect, filter, 0);
+	return 1;
+}
+
+static void OsSwitch_GraphicsMeasurePresent(void)
+{
+	uint64_t now = OsSwitch_TicksNs();
+	if(!gPresentMeasureStart)
+		gPresentMeasureStart = now;
+	gPresentMeasureCount++;
+	if(now - gPresentMeasureStart >= 1000000000ull)
+	{
+		OsSwitch_Log("graphics: %.1f presents/s; queue error=%d",
+			(double)gPresentMeasureCount * 1000000000.0 / (double)(now - gPresentMeasureStart),
+			dkQueueIsInErrorState(gSwitchQueue) ? 1 : 0);
+		gPresentMeasureCount = 0;
+		gPresentMeasureStart = now;
+	}
+}
+
+
 void OsSwitch_GraphicsPresent(void)
 {
 	int slot, upload;
 	DkCopyBuf src;
 	DkImageRect dst;
 	DkResult waitResult;
-	uint64_t now;
 
 	if(!gGraphicsReady || !gFramebuffer)
 		return;
+
+	if(gFrameActive && gGpuBlitReady)
+	{
+		OsSwitch_WindowCompositeChildrenGpu();
+		if(!gFrameInitialized && !OsSwitch_GraphicsQueueBlack())
+			return;
+		if(gQueueErrorLogged || dkQueueIsInErrorState(gSwitchQueue))
+		{
+			gQueueErrorLogged = 1;
+			gFrameActive = 0;
+			gFrameInitialized = 0;
+			return;
+		}
+		if(gFrameUploadSlot >= 0)
+		{
+			OsSwitch_GraphicsSubmitUploadSlot(gFrameUploadSlot);
+			gFrameUploadSlot = -1;
+			gFrameUploadOffset = 0;
+		}
+		dkQueuePresentImage(gSwitchQueue, gSwitchSwapchain, gFrameImageSlot);
+		gLastPresentedSlot = gFrameImageSlot;
+		gLastPresentedValid = 1;
+		gFrameActive = 0;
+		gFrameInitialized = 0;
+		gFrameImageSlot = -1;
+		OsSwitch_GraphicsMeasurePresent();
+		return;
+	}
 
 	if(gQueueErrorLogged)
 		return; // Once failed, the only legal queue operation is destruction.
@@ -342,19 +765,5 @@ void OsSwitch_GraphicsPresent(void)
 	gUploadFenceUsed[upload] = 1;
 	dkQueuePresentImage(gSwitchQueue, gSwitchSwapchain, slot);
 
-	// A one-second rolling count distinguishes a slow software renderer from
-	// a queue that is itself falling behind. Kept in startup.log by the earlier
-	// diagnostics patch.
-	now = OsSwitch_TicksNs();
-	if(!gPresentMeasureStart)
-		gPresentMeasureStart = now;
-	gPresentMeasureCount++;
-	if(now - gPresentMeasureStart >= 1000000000ull)
-	{
-		OsSwitch_Log("graphics: %.1f presents/s; queue error=%d",
-			(double)gPresentMeasureCount * 1000000000.0 / (double)(now - gPresentMeasureStart),
-			dkQueueIsInErrorState(gSwitchQueue) ? 1 : 0);
-		gPresentMeasureCount = 0;
-		gPresentMeasureStart = now;
-	}
+	OsSwitch_GraphicsMeasurePresent();
 }
