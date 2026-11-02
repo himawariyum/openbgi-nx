@@ -612,10 +612,10 @@ int Engine_Main(const char* cmdLine)
 		return 0;
 	}
 #endif
-	if(!gLauncherMode && !DSound8_IsAvailable())
-	{
-		OS_MessageBox(MSG_NO_DIRECTX, "Error!!", OS_MB_ICONHAND | OS_MB_SYSTEMMODAL);
-		return 0;
+	if(!gLauncherMode && !OS_AudioAvailable())
+ 	{
+ 		OS_MessageBox(MSG_NO_DIRECTX, "Error!!", OS_MB_ICONHAND | OS_MB_SYSTEMMODAL);
+ 		return 0;
 	}
 	Drives_Scan();
 	Mouse_ProbeSwap();
