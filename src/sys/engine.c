@@ -600,7 +600,7 @@ int Engine_Main(const char* cmdLine)
 			return 0;
 		}
 	}
-#if !defined(BGI_WASM) // no CPUID on a page: the processor checks are skipped there
+#if !defined(BGI_WASM) && !defined(BGI_SWITCH) // CPUID / CMOV / MMX are x86-only; Switch is AArch64
 	if(!Cpu_Detect())
 	{
 		OS_MessageBox(MSG_CPU_UNSUPPORTED, "Error!!", OS_MB_ICONHAND | OS_MB_SYSTEMMODAL);
