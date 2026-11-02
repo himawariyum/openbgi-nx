@@ -25,6 +25,13 @@
 
 #include "bgi/os.h"
 #include "bgi/os_common.h"
+#include "bgi/os_fontmap.h"
+
+/* Forward declaration: OS_FontFaceExists uses this before its definition. */
+static int FontMapSelectFace(const char* requested, WCHAR* wide, int wideCount);
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 struct OsFont
 {
@@ -164,6 +171,9 @@ static int CALLBACK FaceExistsProc(const LOGFONTW* lf, const TEXTMETRICW* tm, DW
  * directly. */
 int OS_FontFaceExists(const char* face)
 {
+	WCHAR mappedFace[0x100];
+	if(FontMapSelectFace(face, mappedFace, (int)BGI_COUNTOF(mappedFace)))
+		return 1;
 	LOGFONTW lf;
 	HDC dc = GetDC(NULL);
 	int found = 0;
@@ -229,6 +239,67 @@ int OS_FontAddMemory(const void* data, uint32_t size)
 	return AddFontMemResourceEx((void*)data, size, NULL, &n) != NULL;
 }
 
+/* Files loaded for fontmap.json are registered as memory fonts: this keeps
+ * them private to OpenBGI and avoids installing fonts into the user's system.
+ * AddFontMemResourceEx copies the data, so the temporary buffer is released. */
+#define FONTMAP_LOADED_MAX 64
+#define FONTMAP_PATH_MAX 1024
+static char gFontMapLoaded[FONTMAP_LOADED_MAX][FONTMAP_PATH_MAX];
+static int gFontMapLoadedCount;
+
+static int FontMapLoadFile(const char* path)
+{
+	FILE* f;
+	long length;
+	void* data;
+	int i, ok;
+	for(i = 0; i < gFontMapLoadedCount; i++)
+		if(strcmp(gFontMapLoaded[i], path) == 0)
+			return 1;
+	if(gFontMapLoadedCount >= FONTMAP_LOADED_MAX)
+		return 0;
+	f = OS_NativeOpen(path, "rb");
+	if(!f)
+		return 0;
+	if(fseek(f, 0, SEEK_END) != 0 || (length = ftell(f)) <= 0 ||
+	   (unsigned long)length > 0xffffffffUL || fseek(f, 0, SEEK_SET) != 0)
+	{
+		fclose(f);
+		return 0;
+	}
+	data = malloc((size_t)length);
+	if(!data)
+	{
+		fclose(f);
+		return 0;
+	}
+	ok = fread(data, 1, (size_t)length, f) == (size_t)length;
+	fclose(f);
+	if(ok)
+		ok = OS_FontAddMemory(data, (uint32_t)length);
+	free(data);
+	if(!ok)
+		return 0;
+	snprintf(gFontMapLoaded[gFontMapLoadedCount], FONTMAP_PATH_MAX, "%s", path);
+	gFontMapLoadedCount++;
+	return 1;
+}
+
+/* Convert the configured UTF-8 family name to UTF-16 after registering the
+ * file. Return 0 when the mapping or the font file cannot be used; callers
+ * then keep the original BGI-requested face. */
+static int FontMapSelectFace(const char* requested, WCHAR* wide, int wideCount)
+{
+	char path[FONTMAP_PATH_MAX];
+	char family[0x100];
+	int index = 0;
+	if(!OsFontMap_Resolve(requested, path, sizeof path, family, sizeof family, &index))
+		return 0;
+	if(!FontMapLoadFile(path))
+		return 0;
+	return MultiByteToWideChar(CP_UTF8, 0, family, -1, wide, wideCount) > 0;
+}
+
 /* The glyph rasteriser's font: CreateFont(height, width, 0, 0, FW_THIN /
  * FW_BOLD, italic, 0, 0, SHIFTJIS_CHARSET, OUT_TT_PRECIS, 0, PROOF_QUALITY,
  * FIXED_PITCH, face) over an 8-bit DIB; NULL when the font cannot be
@@ -237,8 +308,12 @@ OsFont_t* OS_FontOpen(const char* face, int height, int width, int bold, int ita
 {
 	WCHAR wface[0x100];
 	HFONT font;
-	Win32_ToWide(face, wface, (int)BGI_COUNTOF(wface));
-	font = CreateFontW(height, width, 0, 0, bold ? FW_BOLD : FW_THIN, italic ? 1 : 0, 0, 0, SHIFTJIS_CHARSET,
+	int mapped = FontMapSelectFace(face, wface, (int)BGI_COUNTOF(wface));
+	if(!mapped)
+		Win32_ToWide(face, wface, (int)BGI_COUNTOF(wface));
+	/* The BGI width is tuned for the original face. Let a substituted TTF
+	 * use its own natural average width instead of horizontally scaling it. */
+	font = CreateFontW(height, mapped ? 0 : width, 0, 0, bold ? FW_BOLD : FW_THIN, italic ? 1 : 0, 0, 0, SHIFTJIS_CHARSET,
 		OUT_TT_PRECIS, 0, PROOF_QUALITY, FIXED_PITCH, wface);
 	return FontNew(font, 8);
 }
@@ -250,8 +325,12 @@ OsFont_t* OS_FontOpenMono(const char* face, int size, int bold)
 {
 	WCHAR wface[0x100];
 	HFONT font;
-	Win32_ToWide(face, wface, (int)BGI_COUNTOF(wface));
-	font = CreateFontW(size, size / 2, 0, 0, bold ? FW_BOLD : FW_NORMAL, 0, 0, 0, SHIFTJIS_CHARSET,
+	int mapped = FontMapSelectFace(face, wface, (int)BGI_COUNTOF(wface));
+	if(!mapped)
+		Win32_ToWide(face, wface, (int)BGI_COUNTOF(wface));
+	/* As above, don't force the replacement face into the original face's
+	 * half-em average width. */
+	font = CreateFontW(size, mapped ? 0 : size / 2, 0, 0, bold ? FW_BOLD : FW_NORMAL, 0, 0, 0, SHIFTJIS_CHARSET,
 		OUT_DEFAULT_PRECIS, 0, DRAFT_QUALITY, FIXED_PITCH | FF_ROMAN, wface);
 	return FontNew(font, 1);
 }

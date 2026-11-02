@@ -31,6 +31,7 @@
  */
 #include "bgi/os.h"
 #include "bgi/os_common.h"
+#include "bgi/os_fontmap.h"
 #include "bgi/os_posix.h"
 
 #include <dirent.h>
@@ -265,6 +266,15 @@ static int ResolveFace(const char* sjisFace, int bold, int italic, char* out, si
 		snprintf(out, n, "%s", env);
 		return 1;
 	}
+	{
+		char family[0x100];
+		int mappedIndex = 0;
+		if(OsFontMap_Resolve(sjisFace, out, n, family, sizeof family, &mappedIndex))
+		{
+			*index = mappedIndex;
+			return 1;
+		}
+	}
 #ifdef BGI_HAVE_FONTCONFIG
 	if(ResolveByFontconfig(utf8, mincho, bold, italic, out, n, index))
 		return 1;
@@ -367,6 +377,10 @@ int OS_FontAddFile(const char* path)
 // 1 when fontconfig lists a font of exactly that family; without fontconfig every face "exists"
 int OS_FontFaceExists(const char* face)
 {
+	char path[1024], family[0x100];
+	int index = 0;
+	if(OsFontMap_Resolve(face, path, sizeof path, family, sizeof family, &index))
+		return 1;
 #ifdef BGI_HAVE_FONTCONFIG
 	char utf8[0x200];
 	FcPattern* pat;

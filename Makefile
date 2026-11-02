@@ -189,7 +189,7 @@ SND_SRC  := $(wildcard src/snd/*.c) $(wildcard src/snd/bw/*.c) $(wildcard src/sn
 # the debugger (docs/debugger.md) is not part of the WebAssembly build: the
 # hooks in the engine compile to nothing there (inc/bgi/dbg.h)
 DBG_SRC  := $(if $(filter wasm wasmsim,$(PLATFORM)),,$(wildcard src/dbg/*.c) $(wildcard src/dbg/views/*.c))
-COMMON_OS_SRC := src/os/os_common.c
+COMMON_OS_SRC := src/os/os_common.c src/os/fontmap.c
 
 SRC := $(CORE_SRC) $(ASM_SRC) $(SCN_SRC) $(BPC_SRC) $(DUMP_SRC) $(VM_SRC) $(WAIT_SRC) $(SYS_SRC) $(GFX_SRC) $(SND_SRC) $(DBG_SRC) \
        $(COMMON_OS_SRC) $(OS_SRC)
@@ -233,7 +233,7 @@ switch:
 	$(MAKE) PLATFORM=switch
 
 $(TARGET): $(OBJ) $(ROMFS_FILES) | bin
-	@mkdir -p $(dir $@)
+	@-mkdir -p $(dir $@) 2>/dev/null || mkdir $(subst /,\,$(dir $@)) 2>/dev/null || true
 ifeq ($(PLATFORM),switch)
 	$(CC) $(LDFLAGS) -o bin/bgi$(EXE) $(OBJ) $(LDLIBS)
 	$(DEVKITPRO)/tools/bin/nacptool --create "OpenBGI" "OpenBGI Contributors" "1.0.0" bin/bgi.nacp
@@ -243,20 +243,20 @@ else
 endif
 
 obj/$(PLATFORM)/%.o: src/%.c | inc/bgi/msg.h
-	@mkdir -p $(dir $@)
+	@-mkdir -p $(dir $@) 2>/dev/null || mkdir $(subst /,\,$(dir $@)) 2>/dev/null || true
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 obj/$(PLATFORM)/tools/%.o: tools/%.c | inc/bgi/msg.h
-	@mkdir -p $(dir $@)
+	@-mkdir -p $(dir $@) 2>/dev/null || mkdir $(subst /,\,$(dir $@)) 2>/dev/null || true
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 # third-party single-file libraries are compiled without the project's warnings
 obj/$(PLATFORM)/snd/stb_vorbis.o: src/snd/stb_vorbis.c
-	@mkdir -p $(dir $@)
+	@-mkdir -p $(dir $@) 2>/dev/null || mkdir $(subst /,\,$(dir $@)) 2>/dev/null || true
 	$(CC) $(CSTD) $(OPT) $(INC) -w -c -o $@ $<
 
 bin:
-	@mkdir -p bin
+	@-mkdir -p bin 2>/dev/null || mkdir bin 2>/dev/null || true
 
 # the Shift-JIS message table is generated from tools/messages.txt
 inc/bgi/msg.h: tools/messages.txt tools/mkmsg.py
@@ -317,6 +317,6 @@ test: $(TEST_BIN)
 	@for t in $(TEST_BIN); do echo "  RUN $$t"; $$t || exit 1; done
 
 clean:
-	rm -rf obj bin
+	@-rm -rf obj bin 2>/dev/null || rmdir /s /q obj bin 2>nul || true
 
 -include $(DEP)
