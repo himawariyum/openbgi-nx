@@ -83,6 +83,9 @@ extern int gSwitchShouldClose;
 
 void OsSwitch_AppletHook(AppletHookType hook, void* param);
 
+// Temporary persistent startup log: sdmc:/switch/openbgi/startup.log
+void OsSwitch_Log(const char* format, ...);
+
 // ---- Time -------------------------------------------------------------------
 // Nanoseconds since the back end started (monotonic).
 uint64_t OsSwitch_TicksNs(void);

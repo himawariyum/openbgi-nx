@@ -221,6 +221,7 @@ int OS_RegDeleteKey(const char* key)
 
 int OS_MessageBox(const char* text, const char* caption, uint32_t flags)
 {
+	OsSwitch_Log("OS_MessageBox: caption='%s' text='%s' flags=0x%x", caption ? caption : "", text ? text : "", flags);
 	BGI_UNUSED(text);
 	BGI_UNUSED(caption);
 	switch(flags & 0xf)
@@ -314,6 +315,7 @@ int OS_DialogProfile(char* surname, char* givenName, char* nickname, char* prono
 int OS_LauncherDialog(OsLauncher_t* l)
 {
 	BGI_UNUSED(l);
+	OsSwitch_Log("OS_LauncherDialog called: Switch launcher UI is not implemented; returning -1");
 	return -1;
 }
 

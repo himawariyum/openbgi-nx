@@ -10,6 +10,7 @@
 #include "bgi/os_switch.h"
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -21,6 +22,68 @@ AppletHookCookie gSwitchAppletHookCookie;
 int gSwitchShouldClose = 0;
 
 static char gBinaryDir[512] = "sdmc:/switch/openbgi/";
+static char gSwitchArgv0[1024];
+static FILE* gSwitchLog;
+
+void OsSwitch_Log(const char* format, ...)
+{
+	va_list args;
+	if(!gSwitchLog || !format)
+		return;
+	va_start(args, format);
+	vfprintf(gSwitchLog, format, args);
+	va_end(args);
+	fputc('\n', gSwitchLog);
+	fflush(gSwitchLog);
+}
+
+static int SwitchDirHasBootFile(const char* dir, const char* name)
+{
+	char path[1200];
+	struct stat st;
+	int n = snprintf(path, sizeof path, "%s/%s", dir, name);
+	return n > 0 && (size_t)n < sizeof path && stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+/* Homebrew Menu and forwarders commonly launch an NRO without a game path
+ * argument.  When the NRO sits beside ipl._bp or system.arc, use that
+ * directory as the game root instead of the empty default romfs:/ root. */
+static void SwitchAutoSelectGameRoot(void)
+{
+	char dir[1024];
+	char* slash;
+	dir[0] = 0;
+	if(gSwitchArgv0[0])
+	{
+		snprintf(dir, sizeof dir, "%s", gSwitchArgv0);
+		slash = strrchr(dir, '/');
+		if(!slash)
+			slash = strrchr(dir, '\\');
+		if(slash)
+		{
+			if((slash == dir + 5 && strncmp(dir, "sdmc:", 5) == 0) ||
+			   (slash == dir + 6 && strncmp(dir, "romfs:", 6) == 0))
+				slash[1] = 0;
+			else
+				*slash = 0;
+		}
+		else
+			dir[0] = 0;
+	}
+	if(!dir[0] && !getcwd(dir, sizeof dir))
+	{
+		OsSwitch_Log("auto game root: argv0 has no directory and getcwd failed");
+		return;
+	}
+	OsSwitch_Log("argv0='%s'; candidate game dir='%s'", gSwitchArgv0, dir);
+	if(SwitchDirHasBootFile(dir, "ipl._bp") || SwitchDirHasBootFile(dir, "system.arc"))
+	{
+		OsSwitch_SetGameRoot(dir);
+		OsSwitch_Log("auto game root selected: %s", dir);
+	}
+	else
+		OsSwitch_Log("no ipl._bp or system.arc beside NRO/current directory; game root remains romfs:/");
+}
 
 void OsSwitch_AppletHook(AppletHookType hook, void* param)
 {
@@ -32,33 +95,52 @@ void OsSwitch_AppletHook(AppletHookType hook, void* param)
 int OS_Init(void)
 {
 	Result rc = romfsInit();
-	if(R_FAILED(rc))
-		printf("romfsInit failed: 0x%x (continuing without romfs)\n", rc);
 
 	appletHook(&gSwitchAppletHookCookie, OsSwitch_AppletHook, NULL);
 
 	// Make sure the writable root exists.
 	mkdir("sdmc:/switch", 0777);
 	mkdir("sdmc:/switch/openbgi", 0777);
+	gSwitchLog = fopen("sdmc:/switch/openbgi/startup.log", "wb");
+	OsSwitch_Log("OpenBGI Switch startup log");
+	OsSwitch_Log("romfsInit result: 0x%x", (unsigned)rc);
+	if(R_FAILED(rc))
+		printf("romfsInit failed: 0x%x (continuing without romfs)\n", rc);
+	SwitchAutoSelectGameRoot();
 
 	OsSwitch_InputInit();
+	OsSwitch_Log("input initialized");
 
 	if(!OsSwitch_GraphicsInit(1280, 720))
 	{
+		OsSwitch_Log("OS_Init: OsSwitch_GraphicsInit FAILED");
 		printf("Failed to initialize graphics\n");
+		if(gSwitchLog)
+		{
+			fclose(gSwitchLog);
+			gSwitchLog = NULL;
+		}
 		return 0;
 	}
+	OsSwitch_Log("OS_Init: graphics initialized; returning success");
 
 	return 1;
 }
 
 void OS_Shutdown(void)
 {
+	OsSwitch_Log("OS_Shutdown: begin");
 	OsSwitch_FontShutdown();
 	OsSwitch_GraphicsShutdown();
 	OsSwitch_InputShutdown();
 	appletUnhook(&gSwitchAppletHookCookie);
 	romfsExit();
+	OsSwitch_Log("OS_Shutdown: complete");
+	if(gSwitchLog)
+	{
+		fclose(gSwitchLog);
+		gSwitchLog = NULL;
+	}
 }
 
 // The engine's base directory is the pseudo drive "C:\".
@@ -74,7 +156,7 @@ void OS_BinaryDir(char* buf, size_t n)
 
 void OS_SetArgv0(const char* argv0)
 {
-	BGI_UNUSED(argv0);
+	snprintf(gSwitchArgv0, sizeof gSwitchArgv0, "%s", argv0 ? argv0 : "");
 }
 
 void OS_GameDir(char* buf, size_t n)

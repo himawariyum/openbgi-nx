@@ -59,6 +59,7 @@ int OsSwitch_GraphicsInit(int width, int height)
 		width = 1280;
 		height = 720;
 	}
+	OsSwitch_Log("graphics init: %dx%d", width, height);
 
 	gSwitchFramebufferWidth = (uint32_t)width;
 	gSwitchFramebufferHeight = (uint32_t)height;
@@ -69,9 +70,11 @@ int OsSwitch_GraphicsInit(int width, int height)
 	gSwitchDevice = dkDeviceCreate(&deviceMaker);
 	if(!gSwitchDevice)
 	{
+		OsSwitch_Log("graphics: dkDeviceCreate FAILED");
 		printf("graphics: dkDeviceCreate failed\n");
 		return 0;
 	}
+	OsSwitch_Log("graphics: dkDeviceCreate OK");
 
 	// Image layout shared by the swapchain images.
 	dkImageLayoutMakerDefaults(&layoutMaker, gSwitchDevice);
@@ -90,6 +93,7 @@ int OsSwitch_GraphicsInit(int width, int height)
 	gSwitchImageMemBlock = dkMemBlockCreate(&memMaker);
 	if(!gSwitchImageMemBlock)
 	{
+		OsSwitch_Log("graphics: framebuffer memory allocation FAILED");
 		printf("graphics: framebuffer memory allocation failed\n");
 		OsSwitch_GraphicsShutdown();
 		return 0;
@@ -106,10 +110,12 @@ int OsSwitch_GraphicsInit(int width, int height)
 	gSwitchSwapchain = dkSwapchainCreate(&swapMaker);
 	if(!gSwitchSwapchain)
 	{
+		OsSwitch_Log("graphics: dkSwapchainCreate FAILED");
 		printf("graphics: dkSwapchainCreate failed\n");
 		OsSwitch_GraphicsShutdown();
 		return 0;
 	}
+	OsSwitch_Log("graphics: dkSwapchainCreate OK");
 
 	// Command memory and command buffer.
 	dkMemBlockMakerDefaults(&memMaker, gSwitchDevice, SWITCH_CMD_SIZE);
@@ -117,6 +123,7 @@ int OsSwitch_GraphicsInit(int width, int height)
 	gCmdMem = dkMemBlockCreate(&memMaker);
 	if(!gCmdMem)
 	{
+		OsSwitch_Log("graphics: command memory allocation FAILED");
 		printf("graphics: command memory allocation failed\n");
 		OsSwitch_GraphicsShutdown();
 		return 0;
@@ -125,6 +132,7 @@ int OsSwitch_GraphicsInit(int width, int height)
 	gCmdBuf = dkCmdBufCreate(&cmdMaker);
 	if(!gCmdBuf)
 	{
+		OsSwitch_Log("graphics: dkCmdBufCreate FAILED");
 		printf("graphics: dkCmdBufCreate failed\n");
 		OsSwitch_GraphicsShutdown();
 		return 0;
@@ -137,6 +145,7 @@ int OsSwitch_GraphicsInit(int width, int height)
 	gUploadMem = dkMemBlockCreate(&memMaker);
 	if(!gUploadMem)
 	{
+		OsSwitch_Log("graphics: upload buffer allocation FAILED");
 		printf("graphics: upload buffer allocation failed\n");
 		OsSwitch_GraphicsShutdown();
 		return 0;
@@ -152,6 +161,7 @@ int OsSwitch_GraphicsInit(int width, int height)
 		gSwitchQueue = dkQueueCreate(&queueMaker);
 		if(!gSwitchQueue)
 		{
+			OsSwitch_Log("graphics: dkQueueCreate FAILED");
 			printf("graphics: dkQueueCreate failed\n");
 			OsSwitch_GraphicsShutdown();
 			return 0;
@@ -159,6 +169,7 @@ int OsSwitch_GraphicsInit(int width, int height)
 	}
 
 	gGraphicsReady = 1;
+	OsSwitch_Log("graphics: ready (%ux%u)", gSwitchFramebufferWidth, gSwitchFramebufferHeight);
 	printf("graphics: %ux%u deko3d swapchain ready\n", gSwitchFramebufferWidth, gSwitchFramebufferHeight);
 	return 1;
 }
