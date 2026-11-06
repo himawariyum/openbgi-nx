@@ -28,13 +28,53 @@ static FILE* gSwitchLog;
 void OsSwitch_Log(const char* format, ...)
 {
 	va_list args;
-	if(!gSwitchLog || !format)
+	static char startupBuf[32][256];
+	static int startupCount = 0;
+	static char hidRing[30][256];
+	static int hidHead = 0;
+	static int hidCount = 0;
+	char lineBuf[256];
+	int isHid = 0;
+	int i, idx;
+
+	if(!format)
 		return;
 	va_start(args, format);
-	vfprintf(gSwitchLog, format, args);
+	vsnprintf(lineBuf, sizeof lineBuf, format, args);
 	va_end(args);
-	fputc('\n', gSwitchLog);
-	fflush(gSwitchLog);
+
+	if(strncmp(lineBuf, "INPUT:", 6) == 0 || strncmp(lineBuf, "OsSwitch_Raise", 14) == 0)
+	{
+		isHid = 1;
+		strcpy(hidRing[hidHead], lineBuf);
+		hidHead = (hidHead + 1) % 30;
+		if(hidCount < 30)
+			hidCount++;
+	}
+	else
+	{
+		if(startupCount < 32)
+		{
+			strcpy(startupBuf[startupCount], lineBuf);
+			startupCount++;
+		}
+	}
+
+	if(gSwitchLog)
+	{
+		rewind(gSwitchLog);
+		ftruncate(fileno(gSwitchLog), 0);
+		for(i = 0; i < startupCount; i++)
+		{
+			fprintf(gSwitchLog, "%s\n", startupBuf[i]);
+		}
+		for(i = 0; i < hidCount; i++)
+		{
+			idx = (hidHead - hidCount + i + 30) % 30;
+			fprintf(gSwitchLog, "%s\n", hidRing[idx]);
+		}
+		fflush(gSwitchLog);
+	}
 }
 
 static int SwitchDirHasBootFile(const char* dir, const char* name)
@@ -95,13 +135,28 @@ void OsSwitch_AppletHook(AppletHookType hook, void* param)
 int OS_Init(void)
 {
 	Result rc = romfsInit();
+	char logPath[1024];
+	char* slash;
 
 	appletHook(&gSwitchAppletHookCookie, OsSwitch_AppletHook, NULL);
 
-	// Make sure the writable root exists.
-	mkdir("sdmc:/switch", 0777);
-	mkdir("sdmc:/switch/openbgi", 0777);
-	gSwitchLog = fopen("sdmc:/switch/openbgi/startup.log", "wb");
+	// Put startup.log in the same directory as the NRO/game if possible
+	snprintf(logPath, sizeof logPath, "%s", gSwitchArgv0);
+	slash = strrchr(logPath, '/');
+	if(!slash)
+		slash = strrchr(logPath, '\\');
+	if(slash)
+	{
+		strcpy(slash + 1, "startup.log");
+		gSwitchLog = fopen(logPath, "wb");
+	}
+	if(!gSwitchLog)
+	{
+		mkdir("sdmc:/switch", 0777);
+		mkdir("sdmc:/switch/openbgi", 0777);
+		gSwitchLog = fopen("sdmc:/switch/openbgi/startup.log", "wb");
+	}
+
 	OsSwitch_Log("OpenBGI Switch startup log");
 	OsSwitch_Log("romfsInit result: 0x%x", (unsigned)rc);
 	if(R_FAILED(rc))
