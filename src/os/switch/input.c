@@ -23,7 +23,6 @@ PadState gSwitchPad;
 #define TOUCH_SAMPLES  16 // touch samples read per update, so short taps are not lost
 
 static int gTouchDown;
-static int gTouchLogged;
 static u64 gTouchLastSample; // sampling_number of the last processed touch sample
 static int gTouchX, gTouchY; // last touch position, in picture pixels
 static int gStickMouseDown;
@@ -81,11 +80,6 @@ static void UpdateTouch(void)
 			gTouchX = mx;
 			gTouchY = my;
 			OsSwitch_CursorPad(0);
-			if(!gTouchDown && gTouchLogged < 40)
-			{
-				gTouchLogged++;
-				OsSwitch_Log("touch raw=%d,%d picture=%d,%d mode=%dx%d", (int)t->touches[0].x, (int)t->touches[0].y, mx, my, mw, mh);
-			}
 			OsSwitch_RaiseMouseMove(mx, my); // the cursor is on the target before the button goes down
 			if(!gTouchDown)
 			{

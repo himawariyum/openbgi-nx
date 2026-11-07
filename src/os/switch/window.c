@@ -599,13 +599,11 @@ int OS_PumpMessages(void)
 		}
 	}
 
-#if !BGI_SWITCH_GPU_BLIT
 	if(gCursorDirty)
 	{ // the engine only presents when the picture changes; show the moved cursor
 		gCursorDirty = 0;
-		OsSwitch_GraphicsPresent();
+		OsSwitch_GraphicsPresentCursor();
 	}
-#endif
 
 	if(gSwitchShouldClose && !gCloseDelivered)
 	{
@@ -674,6 +672,22 @@ static const char* const kArrow[CUR_H] = {
 static uint32_t gCurSave[CUR_W * CUR_H];
 static int gCurSx, gCurSy, gCurSaved;
 
+int OsSwitch_CursorVisible(int* screenX, int* screenY)
+{
+	if(!gAlive || !gPadCursor || gCursorShowCount < 0)
+		return 0;
+	*screenX = OsSwitch_ModeToScreenX(gCursorX);
+	*screenY = OsSwitch_ModeToScreenY(gCursorY);
+	return 1;
+}
+
+const char* const* OsSwitch_CursorBitmap(int* w, int* h)
+{
+	*w = CUR_W;
+	*h = CUR_H;
+	return kArrow;
+}
+
 void OsSwitch_CursorDraw(void)
 {
 	int pitch, fw, fh, x, y;
@@ -735,14 +749,7 @@ void OS_CursorShow(int show)
 {
 	gCursorShowCount += show ? 1 : -1;
 	gCursorDirty = 1;
-	{ // TEMPORARY diagnostic
-		static int logged;
-		if(logged < 20)
-		{
-			logged++;
-			OsSwitch_Log("OS_CursorShow(%d) -> count=%d padCursor=%d", show, gCursorShowCount, gPadCursor);
-		}
-	}
+
 }
 
 void OS_CursorGetPos(int* x, int* y)

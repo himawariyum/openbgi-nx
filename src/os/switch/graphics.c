@@ -53,6 +53,13 @@ static DkImage gBlackImage;
 static DkImageView gBlitImageView;
 static DkImageView gBlackImageView;
 static DkMemBlock gBlitMem;
+/* The cursor-free picture.  Every blit of the engine lands here; a present
+ * copies it into the acquired swapchain image and draws the cursor on that
+ * copy only, so a moving cursor never leaves a trail in the picture. */
+static DkMemBlock gBaseMem;
+static DkImage gBaseImage;
+static DkImageView gBaseView;
+static int gBaseValid;
 static uint32_t gUploadSize;
 static int gGraphicsReady;
 static uint64_t gPresentMeasureStart;
@@ -186,6 +193,17 @@ int OsSwitch_GraphicsInit(int width, int height)
 	gBlitMem = dkMemBlockCreate(&memMaker);
 	if(gBlitMem)
 	{
+		uint32_t baseSize = (imageSize + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
+		dkMemBlockMakerDefaults(&memMaker, gSwitchDevice, baseSize);
+		memMaker.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
+		gBaseMem = dkMemBlockCreate(&memMaker);
+		if(gBaseMem)
+		{
+			dkImageInitialize(&gBaseImage, &gImageLayout, gBaseMem, 0);
+			dkImageViewDefaults(&gBaseView, &gBaseImage);
+		}
+		else
+			OsSwitch_Log("graphics: base image allocation failed; using CPU fallback");
 		dkImageInitialize(&gBlitImage, &gBlitImageLayout, gBlitMem, 0);
 		dkImageViewDefaults(&gBlitImageView, &gBlitImage);
 		dkImageInitialize(&gBlackImage, &gBlackImageLayout, gBlitMem, blackOffset);
@@ -267,7 +285,7 @@ int OsSwitch_GraphicsInit(int width, int height)
 	gGraphicsReady = 1;
 
 #if BGI_SWITCH_GPU_BLIT
-	if(gBlitMem)
+	if(gBlitMem && gBaseMem)
 	{
 		DkCopyBuf blackSource;
 		DkImageRect blackRect = {0, 0, 0, SWITCH_BLIT_BLACK_SIZE, SWITCH_BLIT_BLACK_SIZE, 1};
@@ -355,6 +373,12 @@ void OsSwitch_GraphicsShutdown(void)
 		dkMemBlockDestroy(gBlitMem);
 		gBlitMem = NULL;
 	}
+	if(gBaseMem)
+	{
+		dkMemBlockDestroy(gBaseMem);
+		gBaseMem = NULL;
+	}
+	gBaseValid = 0;
 	if(gSwitchDevice)
 	{
 		dkDeviceDestroy(gSwitchDevice);
@@ -429,25 +453,10 @@ static int OsSwitch_GraphicsQueueBlack(void)
 	if(!gGpuBlitReady || !gFrameActive || gFrameUploadSlot < 0)
 		return 0;
 	dkCmdBufBlitImage(gCmdBuf[gFrameUploadSlot], &gBlackImageView, &srcRect,
-		&gImageViews[gFrameImageSlot], &dstRect,
+		&gBaseView, &dstRect,
 		DkBlitFlag_ModeBlit | DkBlitFlag_FilterNearest, 0);
 	gFrameInitialized = 1;
-	return 1;
-}
-
-static int OsSwitch_GraphicsCopyPreviousFrame(void)
-{
-	DkImageRect rect = {0, 0, 0, gSwitchFramebufferWidth, gSwitchFramebufferHeight, 1};
-	if(!gLastPresentedValid || gLastPresentedSlot == gFrameImageSlot)
-	{
-		gFrameInitialized = 1; // the acquired slot already contains the last frame
-		return 1;
-	}
-	if(gFrameUploadSlot < 0)
-		return 0;
-	dkCmdBufCopyImage(gCmdBuf[gFrameUploadSlot], &gImageViews[gLastPresentedSlot], &rect,
-		&gImageViews[gFrameImageSlot], &rect, 0);
-	gFrameInitialized = 1;
+	gBaseValid = 1;
 	return 1;
 }
 
@@ -478,21 +487,14 @@ int OsSwitch_GraphicsBeginFrame(void)
 		return 0;
 	}
 	dkCmdBufClear(gCmdBuf[gFrameUploadSlot]);
-	if(gLastPresentedValid)
-	{
-		if(!OsSwitch_GraphicsCopyPreviousFrame())
-		{
-			gFrameActive = 0;
-			gFrameImageSlot = -1;
-			return 0;
-		}
-	}
-	else if(!OsSwitch_GraphicsQueueBlack())
+	// the base image keeps the picture between frames; only the very first one starts black
+	if(!gBaseValid && !OsSwitch_GraphicsQueueBlack())
 	{
 		gFrameActive = 0;
 		gFrameImageSlot = -1;
 		return 0;
 	}
+	gFrameInitialized = 1;
 	return 1;
 }
 
@@ -651,8 +653,86 @@ int OsSwitch_GraphicsBlit(const void* pixels, int pitch, int bpp, int surfaceW, 
 
 	dkCmdBufCopyBufferToImage(gCmdBuf[upload], &src, &gBlitImageView, &srcRect, 0);
 	dkCmdBufBlitImage(gCmdBuf[upload], &gBlitImageView, &srcRect,
-		&gImageViews[gFrameImageSlot], &dstRect, filter, 0);
+		&gBaseView, &dstRect, filter, 0);
 	return 1;
+}
+
+/* Copy the cursor-free base into the acquired image and draw the cursor on
+ * the copy.  The arrow is drawn as horizontal runs, each a blit of one
+ * pixel (black or white) of a 2 x 1 patch staged in the scratch image. */
+static void OsSwitch_GraphicsComposeToSlot(void)
+{
+	DkImageRect full = {0, 0, 0, gSwitchFramebufferWidth, gSwitchFramebufferHeight, 1};
+	DkImageRect patch = {0, 0, 0, 2, 1, 1};
+	DkCopyBuf src;
+	const char* const* bmp;
+	uint32_t uploadOffset;
+	uint32_t* px;
+	int sx, sy, cw, ch, y, x, slot = gFrameUploadSlot;
+
+	if(slot < 0)
+		return;
+	dkCmdBufBlitImage(gCmdBuf[slot], &gBaseView, &full, &gImageViews[gFrameImageSlot], &full,
+		DkBlitFlag_ModeBlit | DkBlitFlag_FilterNearest, 0);
+	if(!OsSwitch_CursorVisible(&sx, &sy))
+		return;
+	uploadOffset = (gFrameUploadOffset + 0x3fu) & ~0x3fu;
+	if(uploadOffset + 64u > SWITCH_BLIT_UPLOAD_SIZE)
+		return; // no room left in this slot: no cursor this frame
+	px = (uint32_t*)((uint8_t*)dkMemBlockGetCpuAddr(gUploadMem[slot]) + uploadOffset);
+	px[0] = 0xff000000u; // black (RGBA in memory)
+	px[1] = 0xffffffffu; // white
+	dkMemBlockFlushCpuCache(gUploadMem[slot], uploadOffset, 64);
+	gFrameUploadOffset = uploadOffset + 64u;
+	src.addr = dkMemBlockGetGpuAddr(gUploadMem[slot]) + uploadOffset;
+	src.rowLength = 0;
+	src.imageHeight = 0;
+	dkCmdBufCopyBufferToImage(gCmdBuf[slot], &src, &gBlitImageView, &patch, 0);
+
+	bmp = OsSwitch_CursorBitmap(&cw, &ch);
+	for(y = 0; y < ch; y++)
+	{
+		int dy = sy + y;
+		if(dy < 0 || dy >= (int)gSwitchFramebufferHeight)
+			continue;
+		for(x = 0; x < cw;)
+		{
+			char c = bmp[y][x];
+			int start = x, dx, len;
+			DkImageRect from, to;
+			while(x < cw && bmp[y][x] == c)
+				x++;
+			if(c == ' ')
+				continue;
+			dx = sx + start;
+			len = x - start;
+			if(dx < 0)
+			{
+				len += dx;
+				dx = 0;
+			}
+			if(dx + len > (int)gSwitchFramebufferWidth)
+				len = (int)gSwitchFramebufferWidth - dx;
+			if(len <= 0)
+				continue;
+			from.x = c == '#' ? 0 : 1; from.y = 0; from.z = 0; from.width = 1; from.height = 1; from.depth = 1;
+			to.x = (uint32_t)dx; to.y = (uint32_t)dy; to.z = 0; to.width = (uint32_t)len; to.height = 1; to.depth = 1;
+			dkCmdBufBlitImage(gCmdBuf[slot], &gBlitImageView, &from, &gImageViews[gFrameImageSlot], &to,
+				DkBlitFlag_ModeBlit | DkBlitFlag_FilterNearest, 0);
+		}
+	}
+}
+
+// A frame for the cursor alone: it moved, but the engine has nothing to draw.
+void OsSwitch_GraphicsPresentCursor(void)
+{
+	if(gGpuBlitReady)
+	{
+		if(OsSwitch_GraphicsBeginFrame())
+			OsSwitch_GraphicsPresent();
+	}
+	else
+		OsSwitch_GraphicsPresent();
 }
 
 static void OsSwitch_GraphicsMeasurePresent(void)
@@ -694,6 +774,7 @@ void OsSwitch_GraphicsPresent(void)
 			gFrameInitialized = 0;
 			return;
 		}
+		OsSwitch_GraphicsComposeToSlot();
 		if(gFrameUploadSlot >= 0)
 		{
 			OsSwitch_GraphicsSubmitUploadSlot(gFrameUploadSlot);
