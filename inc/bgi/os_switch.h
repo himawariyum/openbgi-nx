@@ -51,6 +51,10 @@ int OsSwitch_ModeToScreenY(int y);
 int OsSwitch_ScreenToModeX(int x);
 int OsSwitch_ScreenToModeY(int y);
 void OsSwitch_WindowSetPictureSize(int w, int h);
+void OsSwitch_ModeSize(int* w, int* h); // the picture size the cursor lives in
+void OsSwitch_CursorPad(int pad);       // 1: the pad drives the pointer, draw the cursor; 0: touch, hide it
+void OsSwitch_CursorDraw(void);         // draw the cursor over the framebuffer (just before the upload)
+void OsSwitch_CursorErase(void);        // and put the pixels back (just after it)
 
 // ---- Input ------------------------------------------------------------------
 extern PadState gSwitchPad;

@@ -742,7 +742,9 @@ void OsSwitch_GraphicsPresent(void)
 		}
 	}
 
+	OsSwitch_CursorDraw();
 	memcpy(dkMemBlockGetCpuAddr(gUploadMem[upload]), gFramebuffer, gUploadSize);
+	OsSwitch_CursorErase();
 	dkMemBlockFlushCpuCache(gUploadMem[upload], 0, gUploadSize);
 
 	src.addr = dkMemBlockGetGpuAddr(gUploadMem[upload]);

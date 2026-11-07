@@ -39,6 +39,8 @@ static int gOffX, gOffY;
 static int gCursorX = 400, gCursorY = 300;
 static int gCursorShape = OS_CURSOR_ARROW;
 static int gCursorShowCount;
+static int gPadCursor;    // the pad moved the pointer: draw it (the touch screen needs no cursor)
+static int gCursorDirty;  // the cursor changed since it was last presented
 static int gKeys[256];
 static int gCloseRequested, gQuitPosted, gCloseDelivered;
 static int gDragAccept;
@@ -270,6 +272,12 @@ int OS_WindowCreate(const OsWindowDesc_t* d)
 
 	if(gHandlers.created)
 		gHandlers.created();
+	/* Windows sends WM_ACTIVATE right after WM_CREATE; the engine's
+	 * Window_IsActive() (gWindowActive) only becomes true through this
+	 * handler, and menus / waits that require the focus ignore all input
+	 * until then. */
+	if(gHandlers.activate)
+		gHandlers.activate(1);
 	return 1;
 }
 
@@ -375,20 +383,32 @@ void OS_ImeStatus(int open)
 	BGI_UNUSED(open);
 }
 
+/* The engine's "screen" space is the picture (mode) space here, as for a
+ * full-screen window on the other back ends: OS_CursorGetPos / SetPos, the
+ * mouse events and the client area all use picture pixels, and the
+ * letterbox is only applied when drawing and when reading the touch screen
+ * (OsSwitch_ScreenToMode*).  So the client origin is (0, 0) and both
+ * conversions are the identity.  (Mapping them through the letterbox made
+ * GetMouseClientPos subtract the letterbox offset, which shifted every
+ * hit test whenever the mode is not 1280x720.) */
 void OS_ClientToScreen(int* x, int* y)
 {
-	if(x)
-		*x = OsSwitch_ModeToScreenX(*x);
-	if(y)
-		*y = OsSwitch_ModeToScreenY(*y);
+	BGI_UNUSED(x);
+	BGI_UNUSED(y);
 }
 
 void OS_ScreenToClient(int* x, int* y)
 {
-	if(x)
-		*x = OsSwitch_ScreenToModeX(*x);
-	if(y)
-		*y = OsSwitch_ScreenToModeY(*y);
+	BGI_UNUSED(x);
+	BGI_UNUSED(y);
+}
+
+void OsSwitch_ModeSize(int* w, int* h)
+{
+	if(w)
+		*w = gModeW;
+	if(h)
+		*h = gModeH;
 }
 
 // ---- display modes ----------------------------------------------------------
@@ -516,12 +536,22 @@ void OsSwitch_RaiseKey(int vk, int down)
 	gEventCount++;
 }
 
+void OsSwitch_CursorPad(int pad)
+{
+	pad = pad != 0;
+	if(pad != gPadCursor)
+		gCursorDirty = 1;
+	gPadCursor = pad;
+}
+
 void OsSwitch_RaiseMouseMove(int x, int y)
 {
 	if(x == gCursorX && y == gCursorY)
 		return;
 	gCursorX = x;
 	gCursorY = y;
+	if(gPadCursor)
+		gCursorDirty = 1;
 	if(gHandlers.mouse_move)
 		gHandlers.mouse_move(x, y);
 	gEventCount++;
@@ -529,6 +559,10 @@ void OsSwitch_RaiseMouseMove(int x, int y)
 
 void OsSwitch_RaiseMouseButton(int button, int down, int x, int y)
 {
+	// the buttons are virtual keys 1 (L), 2 (R), 4 (M), 5, 6 for OS_KeyState (GetAsyncKeyState)
+	static const int vks[5] = {0x01, 0x02, 0x04, 0x05, 0x06};
+	if(button >= 0 && button < 5)
+		gKeys[vks[button]] = down ? 0x80 : 0;
 	gCursorX = x;
 	gCursorY = y;
 	if(gHandlers.mouse_button)
@@ -552,6 +586,26 @@ int OS_PumpMessages(void)
 		gSwitchShouldClose = 1;
 
 	OsSwitch_InputUpdate();
+
+	{ // the applet focus (HOME menu, a system dialog) is the window's activation
+		static int sFocus = 1;
+		int focus = appletGetFocusState() == AppletFocusState_InFocus;
+		if(focus != sFocus)
+		{
+			sFocus = focus;
+			gActive = focus;
+			if(gHandlers.activate)
+				gHandlers.activate(focus);
+		}
+	}
+
+#if !BGI_SWITCH_GPU_BLIT
+	if(gCursorDirty)
+	{ // the engine only presents when the picture changes; show the moved cursor
+		gCursorDirty = 0;
+		OsSwitch_GraphicsPresent();
+	}
+#endif
 
 	if(gSwitchShouldClose && !gCloseDelivered)
 	{
@@ -592,6 +646,86 @@ void OS_DragAccept(int accept)
 
 // ---- cursor -----------------------------------------------------------------
 
+/* The Switch has no system cursor, so the one the engine shows (OS_CursorShow)
+ * is drawn here: an arrow over the software framebuffer while it is uploaded
+ * (graphics.c), the pixels under it saved and put back right after, so the
+ * engine's partial redraws never see it. */
+#define CUR_W 12
+#define CUR_H 18
+static const char* const kArrow[CUR_H] = {
+	"#           ",
+	"##          ",
+	"#.#         ",
+	"#..#        ",
+	"#...#       ",
+	"#....#      ",
+	"#.....#     ",
+	"#......#    ",
+	"#.......#   ",
+	"#........#  ",
+	"#.........# ",
+	"#......#####",
+	"#...#..#    ",
+	"#..# #..#   ",
+	"#.#  #..#   ",
+	"##    #..#  ",
+	"#     #..#  ",
+	"       ##   "};
+static uint32_t gCurSave[CUR_W * CUR_H];
+static int gCurSx, gCurSy, gCurSaved;
+
+void OsSwitch_CursorDraw(void)
+{
+	int pitch, fw, fh, x, y;
+	uint32_t* fb;
+	gCurSaved = 0;
+	if(!gAlive || !gPadCursor || gCursorShowCount < 0)
+		return;
+	fb = OsSwitch_Framebuffer(&pitch, &fw, &fh);
+	if(!fb)
+		return;
+	gCurSx = OsSwitch_ModeToScreenX(gCursorX);
+	gCurSy = OsSwitch_ModeToScreenY(gCursorY);
+	for(y = 0; y < CUR_H; y++)
+	{
+		for(x = 0; x < CUR_W; x++)
+		{
+			int px = gCurSx + x, py = gCurSy + y;
+			char c = kArrow[y][x];
+			if(px < 0 || py < 0 || px >= fw || py >= fh)
+				continue;
+			gCurSave[y * CUR_W + x] = fb[(size_t)py * (size_t)pitch + px];
+			if(c == '#')
+				fb[(size_t)py * (size_t)pitch + px] = 0xff000000u;
+			else if(c == '.')
+				fb[(size_t)py * (size_t)pitch + px] = 0xffffffffu;
+		}
+	}
+	gCurSaved = 1;
+}
+
+void OsSwitch_CursorErase(void)
+{
+	int pitch, fw, fh, x, y;
+	uint32_t* fb;
+	if(!gCurSaved)
+		return;
+	gCurSaved = 0;
+	fb = OsSwitch_Framebuffer(&pitch, &fw, &fh);
+	if(!fb)
+		return;
+	for(y = 0; y < CUR_H; y++)
+	{
+		for(x = 0; x < CUR_W; x++)
+		{
+			int px = gCurSx + x, py = gCurSy + y;
+			if(px < 0 || py < 0 || px >= fw || py >= fh || kArrow[y][x] == ' ')
+				continue;
+			fb[(size_t)py * (size_t)pitch + px] = gCurSave[y * CUR_W + x];
+		}
+	}
+}
+
 void OS_CursorSetShape(int shape)
 {
 	gCursorShape = shape;
@@ -600,6 +734,15 @@ void OS_CursorSetShape(int shape)
 void OS_CursorShow(int show)
 {
 	gCursorShowCount += show ? 1 : -1;
+	gCursorDirty = 1;
+	{ // TEMPORARY diagnostic
+		static int logged;
+		if(logged < 20)
+		{
+			logged++;
+			OsSwitch_Log("OS_CursorShow(%d) -> count=%d padCursor=%d", show, gCursorShowCount, gPadCursor);
+		}
+	}
 }
 
 void OS_CursorGetPos(int* x, int* y)

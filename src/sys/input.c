@@ -678,6 +678,36 @@ int MouseLayer_Hit(uint32_t key)
 	return 0;
 }
 
+#ifdef __SWITCH__
+#include "bgi/os_switch.h"
+// TEMPORARY diagnostic: when the left-button counter changes, log the cursor and the mouse layers
+static void DbgLogClick(void)
+{
+	static int last, logged;
+	InputLayer_t* l;
+	int pos[2], n = 0;
+	if(GetKeyCounter(1) == last || logged >= 40)
+		return;
+	last = GetKeyCounter(1);
+	logged++;
+	GetMouseClientPos(pos);
+	OsSwitch_Log("click #%d cursor=%d,%d inputEnable=%d active=%d", last, pos[0], pos[1], gInputEnable, Window_IsActive());
+	for(l = gMouseLayers; l && n < 8; l = l->next, n++)
+	{
+		Rect_t r;
+		int vis = 1;
+		if(l->sprite)
+		{
+			vis = l->sprite->vt->isVisible(l->sprite);
+			l->sprite->vt->screenRect(l->sprite, &r);
+			OsSwitch_Log("  layer key=%u sprite vis=%d rect=%d,%d..%d,%d", (unsigned)l->key, vis, r.l, r.t, r.r, r.b);
+		}
+		else
+			OsSwitch_Log("  layer key=%u plain", (unsigned)l->key);
+	}
+}
+#endif
+
 /* "80 1A": the input pending for a pair of layers, as a mask: bit 31
  * skip, bits 6 .. 30 the standard-key groups (when the key layer is on
  * top), bits 0, 1, 2, 4, 5 the mouse buttons (when the mouse layer is
@@ -686,6 +716,9 @@ int MouseLayer_Hit(uint32_t key)
 uint32_t Input_Poll(uint32_t keyLayer, uint32_t mouseLayer)
 {
 	uint32_t mask = 0;
+#ifdef __SWITCH__
+	DbgLogClick();
+#endif
 	if(KeyLayer_IsTop(keyLayer))
 	{
 		mask = StdKeys_PollTriggers();
