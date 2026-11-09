@@ -45,14 +45,16 @@ The games we have been working on, with the engine build each one needs
 | Prism Rhythm | `PrismRhythm` | 1.494 | Very playable |
 | Sekai to Sekai no Mannaka de | `SekaiToSekaiNoMannakaDe` | 1.588 | Very playable |
 | Sen no Hatou, Tsukisome no Kouki (trial) | `SenNoHatouTsukisomeNoKouki` | 1.636 | Testing in progress |
-| Wonderful Everyday Full Voice HD Edition | `SubarashikiHibi` | 1.647 | Playable |
 | Tayutama -It's happy days- | `TayutamaHD` | 1.69 build 472 | Very playable |
 | Tayutama -Kiss on my Deity- | `Tayutama` | 1.69 build 451 | Very playable |
 | Tayutama -Kiss on my Deity- (trial; the reference build) | `Tayutama` | 1.69 build 444 | Very playable |
 | Tayutama 2 -After Stories- | `Tayutama2AS` | 1.640 | Playable |
 | Unmei Senjou no Phi | `UnmeisenjouNoPhi` | 1.599 | Very playable |
 | Wakabairo no Quartet | `WakabaironoQuartet` | 1.653 | Playable |
+| Wonderful Everyday Full Voice HD Edition | `SubarashikiHibiHD` | 1.647 | Playable**(1)** |
 | Yumahorome | `Yumahorome` | 1.662 | Boots, but crashes in prolouge |
+
+**(1)** To play subahibihd you will need to patch it's ipl._bp module. python compat/subahibi_ipl_patch.py "\steamapps\common\Wonderful Everyday Down the Rabbit-Hole\ipl._bp"
 
 ### Definitions
 

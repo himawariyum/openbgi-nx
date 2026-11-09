@@ -587,9 +587,12 @@ int OS_PumpMessages(void)
 
 	OsSwitch_InputUpdate();
 
-	{ // the applet focus (HOME menu, a system dialog) is the window's activation
+	if(gSwitchFocusEvent)
+	{ // the applet focus (HOME menu, a system dialog) is the window's activation; only
+	  // a reported change counts, a title started from the HOME menu is active from the start
 		static int sFocus = 1;
 		int focus = appletGetFocusState() == AppletFocusState_InFocus;
+		gSwitchFocusEvent = 0;
 		if(focus != sFocus)
 		{
 			sFocus = focus;

@@ -96,6 +96,8 @@ void OsSwitch_FontShutdown(void);
 // ---- Application lifecycle --------------------------------------------------
 extern AppletHookCookie gSwitchAppletHookCookie;
 extern int gSwitchShouldClose;
+extern int gSwitchFocusEvent;
+void OsSwitch_FixArgs(int* argc, char*** argv); // regroup the launch arguments (main.c)
 
 void OsSwitch_AppletHook(AppletHookType hook, void* param);
 

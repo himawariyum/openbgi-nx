@@ -15,11 +15,13 @@
 #include <string.h>
 #include <errno.h>
 #include <dirent.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 AppletHookCookie gSwitchAppletHookCookie;
 int gSwitchShouldClose = 0;
+int gSwitchFocusEvent = 0; // the applet focus state changed (OS_PumpMessages raises the activation)
 
 static char gBinaryDir[512] = "sdmc:/switch/openbgi/";
 static char gSwitchArgv0[1024];
@@ -28,7 +30,7 @@ static FILE* gSwitchLog;
 void OsSwitch_Log(const char* format, ...)
 {
 	va_list args;
-	static char startupBuf[32][256];
+	static char startupBuf[64][256];
 	static int startupCount = 0;
 	static char hidRing[30][256];
 	static int hidHead = 0;
@@ -53,7 +55,7 @@ void OsSwitch_Log(const char* format, ...)
 	}
 	else
 	{
-		if(startupCount < 32)
+		if(startupCount < 64)
 		{
 			strcpy(startupBuf[startupCount], lineBuf);
 			startupCount++;
@@ -85,9 +87,121 @@ static int SwitchDirHasBootFile(const char* dir, const char* name)
 	return n > 0 && (size_t)n < sizeof path && stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-/* Homebrew Menu and forwarders commonly launch an NRO without a game path
- * argument.  When the NRO sits beside ipl._bp or system.arc, use that
- * directory as the game root instead of the empty default romfs:/ root. */
+/* Launchers hand the NRO path over in different shapes: in quotes, with
+ * backslashes, or without the "sdmc:" device.  Normalise it in place
+ * (`cap` leaves room for the "sdmc:" that may be added). */
+static void SwitchCleanPath(char* p, size_t cap)
+{
+	size_t len, start = 0;
+	char* c;
+	while(p[start] == ' ' || p[start] == '\t')
+		start++;
+	if(start)
+		memmove(p, p + start, strlen(p + start) + 1);
+	len = strlen(p);
+	while(len && (p[len - 1] == ' ' || p[len - 1] == '\t'))
+		p[--len] = 0;
+	if(len && p[len - 1] == '"')
+		p[--len] = 0;
+	if(p[0] == '"')
+		memmove(p, p + 1, len--);
+	for(c = p; *c; c++)
+		if(*c == '\\')
+			*c = '/';
+	if(p[0] == '/' && len + 6 <= cap)
+	{
+		memmove(p + 5, p, len + 1);
+		memcpy(p, "sdmc:", 5);
+	}
+}
+
+static int SwitchTokenEndsNro(const char* t)
+{
+	size_t n = strlen(t);
+	while(n && (t[n - 1] == '"' || t[n - 1] == ' '))
+		n--;
+	return n >= 4 && strncasecmp(t + n - 4, ".nro", 4) == 0;
+}
+
+#define SWITCH_FIX_MAX 32
+static char* gSwitchFixArgv[SWITCH_FIX_MAX + 1];
+static char gSwitchFixBuf[4096];
+
+// the tokens a..b of `in` joined by single spaces, copied into the static buffer; NULL when it is full
+static char* SwitchFixJoin(char** in, int a, int b, size_t* used)
+{
+	char* start = gSwitchFixBuf + *used;
+	size_t pos = *used;
+	int i;
+	for(i = a; i <= b; i++)
+	{
+		size_t n = strlen(in[i]);
+		if(pos + n + 8 >= sizeof gSwitchFixBuf)
+			return NULL;
+		if(i > a)
+			gSwitchFixBuf[pos++] = ' ';
+		memcpy(gSwitchFixBuf + pos, in[i], n);
+		pos += n;
+	}
+	gSwitchFixBuf[pos++] = 0;
+	*used = pos + 8; // slack for the "sdmc:" that SwitchCleanPath may prepend
+	return start;
+}
+
+/* Put the launch arguments back together.  A forwarder builds the argument
+ * string of the NRO it starts by hand and usually leaves the path unquoted;
+ * libnx then splits it at the spaces, so
+ *     sdmc:/switch/Wonderful Everyday/bgi.nro
+ * arrives as "sdmc:/switch/Wonderful" and "Everyday/bgi.nro" (and the
+ * engine would take the second for a game path).  The path ends at the
+ * first token that ends in ".nro".  What follows is regrouped the same way:
+ * consecutive plain tokens are one argument (a game directory with
+ * spaces), a token starting with '-' is an option of its own. */
+void OsSwitch_FixArgs(int* argc, char*** argv)
+{
+	char** in;
+	size_t used = 0;
+	int n, first, i, out = 0;
+	if(!argc || !argv || *argc <= 0 || !*argv)
+		return;
+	in = *argv;
+	n = *argc;
+	for(i = 0; i < n; i++)
+		OsSwitch_Log("launch argv[%d]='%s'", i, in[i] ? in[i] : "(null)");
+	for(i = 0; i < n; i++)
+		if(!in[i])
+			return;
+	for(first = 0; first < n && !SwitchTokenEndsNro(in[first]); first++)
+		;
+	if(first >= n)
+		first = 0; // no token names an NRO: keep the first as it is
+	gSwitchFixArgv[0] = SwitchFixJoin(in, 0, first, &used);
+	if(!gSwitchFixArgv[0])
+		return;
+	SwitchCleanPath(gSwitchFixArgv[0], strlen(gSwitchFixArgv[0]) + 8);
+	for(i = first + 1; i < n && out < SWITCH_FIX_MAX - 1;)
+	{
+		int j = i;
+		if(in[i][0] != '-' && !strpbrk(in[i], " \t"))
+			while(j + 1 < n && in[j + 1][0] != '-' && !strpbrk(in[j + 1], " \t"))
+				j++;
+		gSwitchFixArgv[++out] = SwitchFixJoin(in, i, j, &used);
+		if(!gSwitchFixArgv[out])
+			return;
+		i = j + 1;
+	}
+	gSwitchFixArgv[out + 1] = NULL;
+	*argc = out + 1;
+	*argv = gSwitchFixArgv;
+	for(i = 0; i <= out; i++)
+		OsSwitch_Log("fixed argv[%d]='%s'", i, gSwitchFixArgv[i]);
+}
+
+/* When the NRO that was launched sits beside ipl._bp or system.arc, its own
+ * directory is the game root (instead of the empty default romfs:/ root).
+ * Nothing else is searched: several games may be installed side by side, and
+ * only the folder of this NRO, or a folder given as an argument (which the
+ * engine applies later, Boot_ParseCmdLine), says which one to run. */
 static void SwitchAutoSelectGameRoot(void)
 {
 	char dir[1024];
@@ -122,7 +236,7 @@ static void SwitchAutoSelectGameRoot(void)
 		OsSwitch_Log("auto game root selected: %s", dir);
 	}
 	else
-		OsSwitch_Log("no ipl._bp or system.arc beside NRO/current directory; game root remains romfs:/");
+		OsSwitch_Log("no ipl._bp or system.arc in '%s': give the game folder as an argument, e.g. \"sdmc:/switch/My Game\"", dir);
 }
 
 void OsSwitch_AppletHook(AppletHookType hook, void* param)
@@ -130,6 +244,43 @@ void OsSwitch_AppletHook(AppletHookType hook, void* param)
 	BGI_UNUSED(param);
 	if(hook == AppletHookType_OnExitRequest)
 		gSwitchShouldClose = 1;
+	else if(hook == AppletHookType_OnFocusState)
+		gSwitchFocusEvent = 1;
+}
+
+/* romfsInit() could not find the NRO's romfs.  Read the NRO's asset header
+ * (it follows the NRO image: "ASET", version, then the icon, nacp and romfs
+ * sections as offset/size pairs relative to the header) and mount the romfs
+ * from the cleaned-up NRO path. */
+static Result SwitchMountRomfsFromNro(void)
+{
+	u8 hdr[0x38];
+	u32 nroSize = 0, magic = 0;
+	u64 romfsOff = 0;
+	FILE* f;
+	if(!gSwitchArgv0[0])
+		return MAKERESULT(Module_Libnx, LibnxError_NotFound);
+	f = fopen(gSwitchArgv0, "rb");
+	if(!f)
+	{
+		OsSwitch_Log("romfs fallback: cannot open '%s'", gSwitchArgv0);
+		return MAKERESULT(Module_Libnx, LibnxError_NotFound);
+	}
+	if(fseek(f, 0x18, SEEK_SET) != 0 || fread(&nroSize, 4, 1, f) != 1 || fseek(f, (long)nroSize, SEEK_SET) != 0 ||
+	   fread(hdr, sizeof hdr, 1, f) != 1)
+	{
+		fclose(f);
+		return MAKERESULT(Module_Libnx, LibnxError_NotFound);
+	}
+	fclose(f);
+	memcpy(&magic, hdr, 4);
+	if(magic != 0x54455341u) // "ASET"
+	{
+		OsSwitch_Log("romfs fallback: '%s' has no asset header", gSwitchArgv0);
+		return MAKERESULT(Module_Libnx, LibnxError_NotFound);
+	}
+	memcpy(&romfsOff, hdr + 0x28, 8);
+	return romfsMountFromFsdev(gSwitchArgv0, (u64)nroSize + romfsOff, "romfs");
 }
 
 int OS_Init(void)
@@ -159,6 +310,18 @@ int OS_Init(void)
 
 	OsSwitch_Log("OpenBGI Switch startup log");
 	OsSwitch_Log("romfsInit result: 0x%x", (unsigned)rc);
+	{ // how the process was started: a forwarder differs from the Homebrew Menu in these
+		u64 total = 0, used = 0;
+		svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+		svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+		OsSwitch_Log("applet type=%d heap override=%llu MiB memory %llu/%llu MiB used", (int)appletGetAppletType(),
+			(unsigned long long)(envGetHeapOverrideSize() >> 20), (unsigned long long)(used >> 20), (unsigned long long)(total >> 20));
+	}
+	if(R_FAILED(rc))
+	{ // libnx opens argv[0] for the NRO's own romfs; a launcher that mangled it leaves that to us
+		rc = SwitchMountRomfsFromNro();
+		OsSwitch_Log("romfs mounted from the NRO file by path: result 0x%x", (unsigned)rc);
+	}
 	if(R_FAILED(rc))
 		printf("romfsInit failed: 0x%x (continuing without romfs)\n", rc);
 	SwitchAutoSelectGameRoot();
@@ -211,7 +374,10 @@ void OS_BinaryDir(char* buf, size_t n)
 
 void OS_SetArgv0(const char* argv0)
 {
-	snprintf(gSwitchArgv0, sizeof gSwitchArgv0, "%s", argv0 ? argv0 : "");
+	snprintf(gSwitchArgv0, sizeof gSwitchArgv0 - 8, "%s", argv0 ? argv0 : "");
+	SwitchCleanPath(gSwitchArgv0, sizeof gSwitchArgv0);
+	// logged before the file exists: OsSwitch_Log keeps the lines until it does
+	OsSwitch_Log("argv0=%s envHasArgv=%d", argv0 ? "given" : "NULL (no arguments from the launcher)", (int)envHasArgv());
 }
 
 void OS_GameDir(char* buf, size_t n)
@@ -350,10 +516,19 @@ int OS_NativeSeek(FILE* f, uint64_t pos)
 	return fseek(f, (long)pos, SEEK_SET) == 0;
 }
 
+/* "sdmc:/..." and "romfs:/..." are absolute (without this a game folder given as an
+ * argument became "<cwd>/sdmc:/..." and was never found) */
+static int SwitchHasDevice(const char* p)
+{
+	const char* colon = strchr(p, ':');
+	const char* slash = strchr(p, '/');
+	return colon && colon > p + 1 && (!slash || colon < slash);
+}
+
 void OS_NativeAbsolute(const char* path, char* out, size_t n)
 {
 	char cwd[1024];
-	if(path[0] == '/' || !getcwd(cwd, sizeof cwd))
+	if(path[0] == '/' || SwitchHasDevice(path) || !getcwd(cwd, sizeof cwd))
 		snprintf(out, n, "%s", path);
 	else if(strcmp(path, ".") == 0 || !path[0])
 		snprintf(out, n, "%s", cwd);

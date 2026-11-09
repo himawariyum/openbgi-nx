@@ -45,12 +45,20 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int show)
  * "VN/[August] Fortune Arterial", Do not use mutex.) in double quotes
  * unless it already is in them.  Arguments that do not fit the buffer are
  * dropped. */
+#ifdef BGI_SWITCH
+void OsSwitch_FixArgs(int* argc, char*** argv); // os/switch/process.c
+#endif
+
 int main(int argc, char** argv)
 {
 	char cmdLine[0x1000];
 	size_t len = 0;
 	int i, r;
 	cmdLine[0] = 0;
+#ifdef BGI_SWITCH
+	// a forwarder leaves the NRO path unquoted and libnx splits it at the spaces
+	OsSwitch_FixArgs(&argc, &argv);
+#endif
 	for(i = 1; i < argc; i++)
 	{
 		const char* a = argv[i];
@@ -68,7 +76,8 @@ int main(int argc, char** argv)
 			cmdLine[len++] = '"';
 		cmdLine[len] = 0;
 	}
-	OS_SetArgv0(argv[0]);
+	// a launcher may pass no arguments at all (libnx then gives argc 0 and argv NULL)
+	OS_SetArgv0(argc > 0 && argv ? argv[0] : NULL);
 	if(!OS_Init())
 		return -1;
 	r = Engine_Main(cmdLine);
