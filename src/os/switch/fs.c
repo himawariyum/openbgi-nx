@@ -72,19 +72,20 @@ static uint32_t AttrsFromStat(const struct stat* st)
 	return a ? a : OS_ATTR_NORMAL;
 }
 
-OsFile_t* OS_FileOpenRead(const char* path)
+static OsFile_t* FileOpenReadImpl(const char* path)
 {
 	char p[SWITCH_PATH_MAX];
 	struct stat st;
+	int missing = 0;
 	OsFile_t* f = (OsFile_t*)calloc(1, sizeof *f);
 	if(!f)
 		return NULL;
-	OsSwitch_Path(path, p, sizeof p);
-	f->f = fopen(p, "rb");
+	OsSwitch_PathEx(path, p, sizeof p, &missing);
+	f->f = missing ? NULL : fopen(p, "rb"); // a name the directory list lacks is not tried
 	if(!f->f)
 	{
 		OsSwitch_PathWrite(path, p, sizeof p);
-		f->f = fopen(p, "rb");
+		f->f = OsSwitch_NativeMissing(p) ? NULL : fopen(p, "rb");
 	}
 	if(!f->f)
 	{
@@ -103,6 +104,7 @@ OsFile_t* OS_FileOpenRead(const char* path)
 
 OsFile_t* OS_FileCreate(const char* path)
 {
+	OsSwitch_DirCacheFlush(); // the directory lists are out of date once this returns
 	char p[SWITCH_PATH_MAX];
 	OsFile_t* f = (OsFile_t*)calloc(1, sizeof *f);
 	if(!f)
@@ -121,6 +123,7 @@ OsFile_t* OS_FileCreate(const char* path)
 
 OsFile_t* OS_FileOpenWrite(const char* path)
 {
+	OsSwitch_DirCacheFlush(); // the directory lists are out of date once this returns
 	char p[SWITCH_PATH_MAX];
 	OsFile_t* f = (OsFile_t*)calloc(1, sizeof *f);
 	if(!f)
@@ -148,7 +151,7 @@ void OS_FileClose(OsFile_t* f)
 	free(f);
 }
 
-uint32_t OS_FileRead(OsFile_t* f, void* buf, uint32_t n)
+static uint32_t FileReadImpl(OsFile_t* f, void* buf, uint32_t n)
 {
 	if(!f || !f->f)
 		return 0;
@@ -162,14 +165,14 @@ uint32_t OS_FileWrite(OsFile_t* f, const void* buf, uint32_t n)
 	return (uint32_t)fwrite(buf, 1, n, f->f);
 }
 
-int OS_FileSeek(OsFile_t* f, uint32_t pos)
+static int FileSeekImpl(OsFile_t* f, uint32_t pos)
 {
 	if(!f || !f->f)
 		return 0;
 	return fseek(f->f, (long)pos, SEEK_SET) == 0;
 }
 
-uint32_t OS_FileSize(OsFile_t* f)
+static uint32_t FileSizeImpl(OsFile_t* f)
 {
 	long pos, end;
 	if(!f || !f->f)
@@ -179,6 +182,73 @@ uint32_t OS_FileSize(OsFile_t* f)
 	end = ftell(f->f);
 	fseek(f->f, pos, SEEK_SET);
 	return end < 0 ? 0 : (uint32_t)end;
+}
+
+OsSwitchFsStats_t gSwitchFsStats;
+
+OsFile_t* OS_FileOpenRead(const char* path)
+{
+	static int logged;
+	uint64_t t = OsSwitch_TicksNs();
+	OsFile_t* f = FileOpenReadImpl(path);
+	gSwitchFsStats.openNs += OsSwitch_TicksNs() - t;
+	gSwitchFsStats.opens++;
+	if(logged < 16)
+	{ // the first files the engine asks for: what boot loads, and when
+		logged++;
+		OsSwitch_Log("open %s '%s'", f ? "ok  " : "FAIL", path ? path : "");
+	}
+	return f;
+}
+
+uint32_t OS_FileRead(OsFile_t* f, void* buf, uint32_t n)
+{
+	uint64_t t = OsSwitch_TicksNs();
+	uint32_t r = FileReadImpl(f, buf, n);
+	gSwitchFsStats.readNs += OsSwitch_TicksNs() - t;
+	gSwitchFsStats.reads++;
+	gSwitchFsStats.bytes += r;
+	if(n < 4096)
+		gSwitchFsStats.smallReads++;
+	return r;
+}
+
+int OS_FileSeek(OsFile_t* f, uint32_t pos)
+{
+	uint64_t t = OsSwitch_TicksNs();
+	int r = FileSeekImpl(f, pos);
+	gSwitchFsStats.seekNs += OsSwitch_TicksNs() - t;
+	gSwitchFsStats.seeks++;
+	return r;
+}
+
+uint32_t OS_FileSize(OsFile_t* f)
+{
+	uint64_t t = OsSwitch_TicksNs();
+	uint32_t r = FileSizeImpl(f);
+	gSwitchFsStats.sizeNs += OsSwitch_TicksNs() - t;
+	gSwitchFsStats.sizes++;
+	return r;
+}
+
+// once a second while something changed, for the first seconds: where the boot time goes
+void OsSwitch_FsStatsTick(void)
+{
+	static uint64_t last;
+	static uint32_t prev;
+	static int logged;
+	const OsSwitchFsStats_t* s = &gSwitchFsStats;
+	uint64_t now = OsSwitch_TicksNs();
+	uint32_t activity = s->opens + s->reads + s->seeks + s->sizes + s->paths;
+	if(logged >= 20 || now - last < 1000000000ull || activity == prev)
+		return;
+	last = now;
+	prev = activity;
+	logged++;
+	OsSwitch_Log("fs: open %u (%llu ms) read %u (%u small, %llu KiB, %llu ms) seek %u (%llu ms) size %u (%llu ms) path %u (%llu ms, %u dir scans)",
+		s->opens, (unsigned long long)(s->openNs / 1000000ull), s->reads, s->smallReads, (unsigned long long)(s->bytes >> 10),
+		(unsigned long long)(s->readNs / 1000000ull), s->seeks, (unsigned long long)(s->seekNs / 1000000ull), s->sizes,
+		(unsigned long long)(s->sizeNs / 1000000ull), s->paths, (unsigned long long)(s->pathNs / 1000000ull), s->caseScans);
 }
 
 int OS_FileGetTime(OsFile_t* f, uint32_t* lo, uint32_t* hi)
@@ -243,6 +313,7 @@ int OS_FileSetAttrs(const char* path, uint32_t attrs)
 
 int OS_FileDelete(const char* path)
 {
+	OsSwitch_DirCacheFlush(); // the directory lists are out of date once this returns
 	char p[SWITCH_PATH_MAX];
 	OsSwitch_PathWrite(path, p, sizeof p);
 	return remove(p) == 0;
@@ -250,6 +321,7 @@ int OS_FileDelete(const char* path)
 
 int OS_FileMove(const char* from, const char* to)
 {
+	OsSwitch_DirCacheFlush(); // the directory lists are out of date once this returns
 	char a[SWITCH_PATH_MAX], b[SWITCH_PATH_MAX];
 	OsSwitch_Path(from, a, sizeof a);
 	OsSwitch_PathWrite(to, b, sizeof b);
@@ -261,6 +333,7 @@ int OS_FileMove(const char* from, const char* to)
 
 int OS_FileCopy(const char* from, const char* to, int failIfExists)
 {
+	OsSwitch_DirCacheFlush(); // the directory lists are out of date once this returns
 	char a[SWITCH_PATH_MAX], b[SWITCH_PATH_MAX];
 	FILE* in;
 	FILE* out;
@@ -298,6 +371,7 @@ int OS_FileCopy(const char* from, const char* to, int failIfExists)
 
 int OS_DirCreate(const char* path)
 {
+	OsSwitch_DirCacheFlush(); // the directory lists are out of date once this returns
 	char p[SWITCH_PATH_MAX];
 	OsSwitch_PathWrite(path, p, sizeof p);
 	MakeDirs(p);
@@ -308,6 +382,7 @@ int OS_DirCreate(const char* path)
 
 int OS_DirRemove(const char* path)
 {
+	OsSwitch_DirCacheFlush(); // the directory lists are out of date once this returns
 	char p[SWITCH_PATH_MAX];
 	OsSwitch_PathWrite(path, p, sizeof p);
 	return rmdir(p) == 0;

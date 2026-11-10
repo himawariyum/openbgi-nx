@@ -754,7 +754,13 @@ static void OsSwitch_GraphicsMeasurePresent(void)
 
 void OsSwitch_GraphicsPresent(void)
 {
+	static int sFirst;
 	int slot, upload;
+	if(!sFirst)
+	{
+		sFirst = 1;
+		OsSwitch_Log("first frame presented");
+	}
 	DkCopyBuf src;
 	DkImageRect dst;
 	DkResult waitResult;

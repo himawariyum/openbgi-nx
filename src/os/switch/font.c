@@ -414,7 +414,16 @@ static int ResolveRegistered(int mincho, char* out, size_t n)
 	return 0;
 }
 
-static int ResolveByScan(int mincho, char* out, size_t n)
+/* How deep a font directory is searched.  "sdmc:/switch" holds every
+ * homebrew and game on the card; walking all of it (the old limit was four
+ * levels, with a stat() per entry) took seconds, so only its first two
+ * levels count: fonts beside the NRO or in a game folder are still found. */
+static int FontDirDepth(const char* dir)
+{
+	return strcmp(dir, "sdmc:/switch") == 0 ? 3 : 0;
+}
+
+static int ScanFonts(int mincho, char* out, size_t n)
 {
 	const char* const* names;
 	const char* const* dir;
@@ -424,13 +433,38 @@ static int ResolveByScan(int mincho, char* out, size_t n)
 		names = (mincho ^ pass) ? kMinchoFiles : kGothicFiles;
 		for(; *names; names++)
 			for(dir = kFontDirs; *dir; dir++)
-				if(FindFontFile(*dir, *names, 0, out, n))
+				if(FindFontFile(*dir, *names, FontDirDepth(*dir), out, n))
 					return 1;
 	}
 	for(dir = kFontDirs; *dir; dir++)
-		if(FindAnyFont(*dir, 0, out, n))
+		if(FindAnyFont(*dir, FontDirDepth(*dir), out, n))
 			return 1;
 	return 0;
+}
+
+/* The outcome of the search is the same every time, but OS_FontOpen asks
+ * for it on every font the engine opens (the title screen, each text size,
+ * the menus), so it is remembered: one search per face class. */
+static int ResolveByScan(int mincho, char* out, size_t n)
+{
+	static char cache[2][1024];
+	static int state[2]; // 0 not searched yet, 1 found, 2 nothing found
+	mincho = mincho != 0;
+	if(!state[mincho])
+	{
+		char found[1024];
+		if(ScanFonts(mincho, found, sizeof found))
+		{
+			snprintf(cache[mincho], sizeof cache[mincho], "%s", found);
+			state[mincho] = 1;
+		}
+		else
+			state[mincho] = 2;
+	}
+	if(state[mincho] != 1)
+		return 0;
+	snprintf(out, n, "%s", cache[mincho]);
+	return 1;
 }
 
 static int ResolveFace(const char* sjisFace, int bold, int italic, char* out, size_t n, int* index, int* mapped)
@@ -694,16 +728,28 @@ static uint32_t SjisCodePoint(const char* sjis, int len)
 static int ResolveFallbackFile(OsFont_t* f, uint32_t cp, char* out, size_t n, int* index)
 {
 	static const char* const kFiles[] = {"DejaVuSans.ttf", "FreeSans.ttf", "FreeSerif.ttf", "unifont.otf", "unifont.ttf", NULL};
+	static char cache[1024];
+	static int state; // 0 not searched yet, 1 found, 2 nothing found
 	const char* const* name;
 	const char* const* dir;
 	BGI_UNUSED(f);
 	BGI_UNUSED(cp);
 	*index = 0;
-	for(name = kFiles; *name; name++)
-		for(dir = kFontDirs; *dir; dir++)
-			if(FindFontFile(*dir, *name, 0, out, n))
-				return 1;
-	return 0;
+	if(!state)
+	{
+		state = 2;
+		for(name = kFiles; *name && state == 2; name++)
+			for(dir = kFontDirs; *dir; dir++)
+				if(FindFontFile(*dir, *name, FontDirDepth(*dir), cache, sizeof cache))
+				{
+					state = 1;
+					break;
+				}
+	}
+	if(state != 1)
+		return 0;
+	snprintf(out, n, "%s", cache);
+	return 1;
 }
 
 static int FallbackFor(OsFont_t* f, uint32_t cp, FT_Face* outFace, FT_Size* outSize)

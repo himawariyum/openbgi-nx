@@ -256,7 +256,10 @@ int OS_AudioStart(int rate, OsAudioFill_t fill, void* user)
 	}
 	audrvUpdate(&gAudio.driver);
 
-	if(R_FAILED(threadCreate(&gAudio.thread, AudioThreadFunc, NULL, NULL, 0x4000, 0x2c, -2)))
+	// its own core and a priority above the main thread's, so the mixer is not starved; the process
+	// default (-2) and the main thread's priority are the fallback
+	if(R_FAILED(threadCreate(&gAudio.thread, AudioThreadFunc, NULL, NULL, 0x4000, 0x28, OsSwitch_PickCore(0))) &&
+	   R_FAILED(threadCreate(&gAudio.thread, AudioThreadFunc, NULL, NULL, 0x4000, 0x2c, -2)))
 	{
 		printf("audio: threadCreate failed\n");
 		gAudio.running = 0;
@@ -272,7 +275,8 @@ int OS_AudioStart(int rate, OsAudioFill_t fill, void* user)
 		return 0;
 	}
 	gAudio.threadStarted = 1;
-	OsSwitch_Log("audio: started (%d Hz input -> %d Hz output, stereo, %d wave buffers)", gAudio.inRate, SWITCH_AUDIO_RATE, SWITCH_AUDIO_BUFFERS);
+	OsSwitch_Log("audio: started (%d Hz input -> %d Hz output, stereo, %d wave buffers) on core %d", gAudio.inRate, SWITCH_AUDIO_RATE,
+		SWITCH_AUDIO_BUFFERS, OsSwitch_PickCore(0));
 	printf("audio: %d Hz -> %d Hz, %d buffers\n", gAudio.inRate, SWITCH_AUDIO_RATE, SWITCH_AUDIO_BUFFERS);
 	return 1;
 }

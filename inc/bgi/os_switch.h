@@ -97,6 +97,20 @@ void OsSwitch_FontShutdown(void);
 extern AppletHookCookie gSwitchAppletHookCookie;
 extern int gSwitchShouldClose;
 extern int gSwitchFocusEvent;
+/* File I/O counters for the boot profile (fs.c, paths.c); logged once a second by OsSwitch_FsStatsTick */
+typedef struct OsSwitchFsStats
+{
+	uint64_t openNs, readNs, seekNs, sizeNs, pathNs, bytes;
+	uint32_t opens, reads, smallReads, seeks, sizes, paths, caseScans;
+} OsSwitchFsStats_t;
+extern OsSwitchFsStats_t gSwitchFsStats;
+void OsSwitch_FsStatsTick(void);
+void OsSwitch_PathEx(const char* win, char* out, size_t n, int* missing); // OsSwitch_Path + "known not to exist"
+int OsSwitch_NativeMissing(const char* path);                              // a native path whose directory has no such entry
+void OsSwitch_DirCacheFlush(void);                                         // forget the directory lists (after creating / deleting / moving)
+
+void OsSwitch_CoresInit(void);                  // log the cores and a CPU speed sample (thread.c)
+int OsSwitch_PickCore(int slot);                // a core other than the main thread's, or -2
 void OsSwitch_FixArgs(int* argc, char*** argv); // regroup the launch arguments (main.c)
 
 void OsSwitch_AppletHook(AppletHookType hook, void* param);

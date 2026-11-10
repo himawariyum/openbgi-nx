@@ -30,7 +30,8 @@ static FILE* gSwitchLog;
 void OsSwitch_Log(const char* format, ...)
 {
 	va_list args;
-	static char startupBuf[64][256];
+	static char startupBuf[128][256];
+	static uint64_t t0;
 	static int startupCount = 0;
 	static char hidRing[30][256];
 	static int hidHead = 0;
@@ -55,9 +56,12 @@ void OsSwitch_Log(const char* format, ...)
 	}
 	else
 	{
-		if(startupCount < 64)
-		{
-			strcpy(startupBuf[startupCount], lineBuf);
+		if(startupCount < 128)
+		{ // every line carries the time since the first one (the start of main)
+			uint64_t now = OsSwitch_TicksNs();
+			if(!t0)
+				t0 = now;
+			snprintf(startupBuf[startupCount], sizeof startupBuf[0], "[%6llu ms] %s", (unsigned long long)((now - t0) / 1000000ull), lineBuf);
 			startupCount++;
 		}
 	}
@@ -317,6 +321,7 @@ int OS_Init(void)
 		OsSwitch_Log("applet type=%d heap override=%llu MiB memory %llu/%llu MiB used", (int)appletGetAppletType(),
 			(unsigned long long)(envGetHeapOverrideSize() >> 20), (unsigned long long)(used >> 20), (unsigned long long)(total >> 20));
 	}
+	OsSwitch_CoresInit();
 	if(R_FAILED(rc))
 	{ // libnx opens argv[0] for the NRO's own romfs; a launcher that mangled it leaves that to us
 		rc = SwitchMountRomfsFromNro();

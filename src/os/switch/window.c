@@ -586,6 +586,7 @@ int OS_PumpMessages(void)
 		gSwitchShouldClose = 1;
 
 	OsSwitch_InputUpdate();
+	OsSwitch_FsStatsTick();
 
 	if(gSwitchFocusEvent)
 	{ // the applet focus (HOME menu, a system dialog) is the window's activation; only

@@ -41,6 +41,42 @@ void OS_LockLeave(OsLock_t* l)
 		rmutexUnlock(&l->m);
 }
 
+/* Where threads run.  threadCreate(..., -2) means "the process's default
+ * core", which comes from the NPDM of the title the NRO was started as, so it
+ * differs between launch methods (a forwarder, the Homebrew Menu's title
+ * override): the main thread, the audio thread and the engine's workers could
+ * all end up on one core, starving the audio mixer.  The threads are
+ * therefore put on the process's other cores explicitly. */
+static u64 gCoreMask = 1;
+static int gMainCore;
+
+void OsSwitch_CoresInit(void)
+{
+	u64 mask = 0, t0, ms;
+	volatile u32 x = 1;
+	u32 i;
+	if(R_SUCCEEDED(svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) && mask)
+		gCoreMask = mask;
+	gMainCore = (int)svcGetCurrentProcessorNumber();
+	// a small fixed workload, to compare the CPU speed between launch methods in the log
+	t0 = OsSwitch_TicksNs();
+	for(i = 0; i < 10000000u; i++)
+		x = x * 1664525u + 1013904223u;
+	ms = (OsSwitch_TicksNs() - t0) / 1000000ull;
+	OsSwitch_Log("cores: mask=0x%llx main thread on core %d; cpu bench %llu ms (10M mul-add)", (unsigned long long)gCoreMask, gMainCore,
+		(unsigned long long)ms);
+}
+
+// A core other than the main thread's for thread number `slot`, or -2 (the process default) when there is none.
+int OsSwitch_PickCore(int slot)
+{
+	int found[4], n = 0, core;
+	for(core = 0; core < 4; core++)
+		if(((gCoreMask >> core) & 1) && core != gMainCore)
+			found[n++] = core;
+	return n ? found[slot % n] : -2;
+}
+
 struct OsThread
 {
 	Thread t;
@@ -66,8 +102,10 @@ OsThread_t* OS_ThreadStart(OsThreadFn_t fn, void* arg, int priority)
 		prio = 0x20;
 	else if(priority > OS_PRIO_NORMAL)
 		prio = 0x28;
-	if(R_FAILED(threadCreate(&t->t, ThreadEntry, t, NULL, 0x10000, prio, -2)))
+	if(R_FAILED(threadCreate(&t->t, ThreadEntry, t, NULL, 0x10000, prio, OsSwitch_PickCore(1))) &&
+	   R_FAILED(threadCreate(&t->t, ThreadEntry, t, NULL, 0x10000, prio, -2)))
 	{
+		OsSwitch_Log("thread: threadCreate failed (priority 0x%x)", prio);
 		free(t);
 		return NULL;
 	}
