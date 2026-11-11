@@ -1,3 +1,11 @@
+[![library](https://img.shields.io/badge/library-libnx-blue)](https://docs.libretro.com/development/retroarch/compilation/switch-libnx/) [![graphicsapi](https://img.shields.io/badge/graphicsapi-deko3d-green)](https://github.com/devkitPro/deko3d)
+
+# Installation on switch:
+
+1. Copy your game folder to ```sdmc:/switch/<your-game>```
+2. Place bgi.nro into the same folder.
+3. Run through sphaira title override. Or use [NTON](https://github.com/rlaphoenix/nton) to create an nsp forwarder. Use game path "sdmc:/switch/bgi-game" as argument.
+
 # OpenBGI
 
 OpenBGI is an open-source reimplementation, in C99, of Ethornell's
