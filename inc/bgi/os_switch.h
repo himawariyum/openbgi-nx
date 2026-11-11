@@ -105,6 +105,8 @@ typedef struct OsSwitchFsStats
 } OsSwitchFsStats_t;
 extern OsSwitchFsStats_t gSwitchFsStats;
 void OsSwitch_FsStatsTick(void);
+void OsSwitch_PictureRect(int* l, int* t, int* r, int* b); // the picture on the screen, in screen pixels
+void OsSwitch_GraphicsMaintain(void);                      // clear the letterbox bars after drawing has stopped (rate limited)
 void OsSwitch_PathEx(const char* win, char* out, size_t n, int* missing); // OsSwitch_Path + "known not to exist"
 int OsSwitch_NativeMissing(const char* path);                              // a native path whose directory has no such entry
 void OsSwitch_DirCacheFlush(void);                                         // forget the directory lists (after creating / deleting / moving)

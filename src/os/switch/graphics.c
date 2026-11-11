@@ -60,6 +60,15 @@ static DkMemBlock gBaseMem;
 static DkImage gBaseImage;
 static DkImageView gBaseView;
 static int gBaseValid;
+
+/* The letterbox bars are outside the picture, so nothing the engine draws
+ * should reach them, but should anything ever do (or a stray pixel remain), they are
+ * blacked out again: at most every BARS_MIN_INTERVAL_NS, and only once
+ * drawing has been quiet for BARS_QUIET_NS and something was drawn since the last clear. */
+#define BARS_MIN_INTERVAL_NS 2000000000ull
+#define BARS_QUIET_NS        300000000ull
+static uint64_t gLastBlitNs, gBarsClearedNs;
+static int gBlitSinceBars;
 static uint32_t gUploadSize;
 static int gGraphicsReady;
 static uint64_t gPresentMeasureStart;
@@ -654,7 +663,61 @@ int OsSwitch_GraphicsBlit(const void* pixels, int pitch, int bpp, int surfaceW, 
 	dkCmdBufCopyBufferToImage(gCmdBuf[upload], &src, &gBlitImageView, &srcRect, 0);
 	dkCmdBufBlitImage(gCmdBuf[upload], &gBlitImageView, &srcRect,
 		&gBaseView, &dstRect, filter, 0);
+	gLastBlitNs = OsSwitch_TicksNs();
+	gBlitSinceBars = 1;
 	return 1;
+}
+
+static void OsSwitch_GraphicsQueueBlackRect(int x, int y, int w, int h)
+{
+	DkImageRect srcRect = {0, 0, 0, SWITCH_BLIT_BLACK_SIZE, SWITCH_BLIT_BLACK_SIZE, 1};
+	DkImageRect dstRect;
+	if(w <= 0 || h <= 0)
+		return;
+	dstRect.x = (uint32_t)x; dstRect.y = (uint32_t)y; dstRect.z = 0;
+	dstRect.width = (uint32_t)w; dstRect.height = (uint32_t)h; dstRect.depth = 1;
+	dkCmdBufBlitImage(gCmdBuf[gFrameUploadSlot], &gBlackImageView, &srcRect, &gBaseView, &dstRect,
+		DkBlitFlag_ModeBlit | DkBlitFlag_FilterNearest, 0);
+}
+
+static int OsSwitch_GraphicsBarsExist(void)
+{
+	int l, t, r, b;
+	OsSwitch_PictureRect(&l, &t, &r, &b);
+	return l > 0 || t > 0 || r < (int)gSwitchFramebufferWidth || b < (int)gSwitchFramebufferHeight;
+}
+
+static int OsSwitch_GraphicsBarsDue(uint64_t now)
+{
+	return gBlitSinceBars && now - gLastBlitNs >= BARS_QUIET_NS && now - gBarsClearedNs >= BARS_MIN_INTERVAL_NS;
+}
+
+// black over the bars of the base image (the picture itself is not touched)
+static void OsSwitch_GraphicsClearBars(void)
+{
+	int l, t, r, b, w = (int)gSwitchFramebufferWidth, h = (int)gSwitchFramebufferHeight;
+	OsSwitch_PictureRect(&l, &t, &r, &b);
+	OsSwitch_GraphicsQueueBlackRect(0, 0, w, t);
+	OsSwitch_GraphicsQueueBlackRect(0, b, w, h - b);
+	OsSwitch_GraphicsQueueBlackRect(0, t, l, b - t);
+	OsSwitch_GraphicsQueueBlackRect(r, t, w - r, b - t);
+}
+
+// called from the main loop: once the drawing has stopped, present a frame that clears the bars
+void OsSwitch_GraphicsMaintain(void)
+{
+	uint64_t now;
+	if(!gGpuBlitReady || !gBlitSinceBars)
+		return;
+	now = OsSwitch_TicksNs();
+	if(!OsSwitch_GraphicsBarsDue(now))
+		return;
+	if(!OsSwitch_GraphicsBarsExist())
+	{ // no bars (a picture that fills the screen): nothing to clear
+		gBlitSinceBars = 0;
+		return;
+	}
+	OsSwitch_GraphicsPresentCursor();
 }
 
 /* Copy the cursor-free base into the acquired image and draw the cursor on
@@ -672,6 +735,16 @@ static void OsSwitch_GraphicsComposeToSlot(void)
 
 	if(slot < 0)
 		return;
+	{
+		uint64_t now = OsSwitch_TicksNs();
+		if(OsSwitch_GraphicsBarsDue(now))
+		{
+			if(OsSwitch_GraphicsBarsExist())
+				OsSwitch_GraphicsClearBars();
+			gBlitSinceBars = 0;
+			gBarsClearedNs = now;
+		}
+	}
 	dkCmdBufBlitImage(gCmdBuf[slot], &gBaseView, &full, &gImageViews[gFrameImageSlot], &full,
 		DkBlitFlag_ModeBlit | DkBlitFlag_FilterNearest, 0);
 	if(!OsSwitch_CursorVisible(&sx, &sy))

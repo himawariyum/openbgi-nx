@@ -74,6 +74,18 @@ static void RecomputeMapping(void)
 	gOffY = (int)((SWITCH_SCREEN_H - gModeH * gScale) / 2.0);
 }
 
+// the picture's rectangle on the screen (the letterbox bars are outside it)
+void OsSwitch_PictureRect(int* l, int* t, int* r, int* b)
+{
+	int w = (int)gSwitchFramebufferWidth, h = (int)gSwitchFramebufferHeight;
+	int pl = OsSwitch_ModeToScreenX(0), pt = OsSwitch_ModeToScreenY(0);
+	int pr = OsSwitch_ModeToScreenX(gModeW), pb = OsSwitch_ModeToScreenY(gModeH);
+	*l = pl < 0 ? 0 : pl;
+	*t = pt < 0 ? 0 : pt;
+	*r = pr > w ? w : pr;
+	*b = pb > h ? h : pb;
+}
+
 int OsSwitch_ModeToScreenX(int x)
 {
 	return gMapOn ? (int)(x * gScale + 0.5) + gOffX : x;
@@ -148,8 +160,12 @@ static void BlitSurface(const struct OsSwitchDc* dc, int dstX, int dstY, int dst
 		fb = OsSwitch_Framebuffer(&pitch, &fw, &fh);
 		if(!fb)
 			return;
-		cr = fw;
-		cb = fh;
+		/* Draw only inside the picture, like a window clips to its client
+		 * area: an effect that moves the picture (a shake) hands over
+		 * rectangles that reach beyond the mode, and clipping to the whole
+		 * screen put those pixels in the letterbox bars, where nothing
+		 * ever erased them. */
+		OsSwitch_PictureRect(&cl, &ct, &cr, &cb);
 		wx0 = OsSwitch_ModeToScreenX(dstX);
 		wy0 = OsSwitch_ModeToScreenY(dstY);
 		wx1 = OsSwitch_ModeToScreenX(dstX + dstW);
@@ -587,6 +603,7 @@ int OS_PumpMessages(void)
 
 	OsSwitch_InputUpdate();
 	OsSwitch_FsStatsTick();
+	OsSwitch_GraphicsMaintain();
 
 	if(gSwitchFocusEvent)
 	{ // the applet focus (HOME menu, a system dialog) is the window's activation; only
